@@ -72,12 +72,15 @@ private:
     
 public:
     KalmanFilter() {
-        Q_angle = 0.001f;
-        Q_bias = 0.001f;
-        R_measure = 0.03f;
+        Q_angle = 0.1f;
+        Q_bias = 0.1f;
+        R_measure = 0.005f;
         angle = 0.0f;
         bias = 0.0f;
-        memset(P, 0, sizeof(P));
+        P[0][0] = 0.0f;
+        P[0][1] = 0.0f;
+        P[1][0] = 0.0f;
+        P[1][1] = 0.0f;
     }
     
     float getAngle(float newAngle, float newRate, float dt) {
@@ -132,7 +135,7 @@ public:
         ki = i; 
         kd = d;
         integralLimit = intLimit;
-        derivativeFilter = derivFilter;  // Now properly declared
+        derivativeFilter = derivFilter;
         reset();
     }
     
@@ -150,7 +153,7 @@ public:
         float integralTerm = ki * integral;
         
         // Derivative term - using input derivative to avoid derivative kick
-        float inputDerivative = -(input - previousInput) / dt;  // Now previousInput is declared
+        float inputDerivative = -(input - previousInput) / dt;
         
         // Apply low-pass filter to derivative for noise reduction
         filteredDerivative = (derivativeFilter * filteredDerivative) + ((1.0 - derivativeFilter) * inputDerivative);
@@ -158,7 +161,7 @@ public:
         
         // Store values for next iteration
         previousError = error;
-        previousInput = input;  // Now properly declared
+        previousInput = input;
         
         return proportional + integralTerm + derivativeTerm;
     }
@@ -193,7 +196,7 @@ public:
 
 // Flight control objects
 KalmanFilter kalmanX, kalmanY, kalmanZ;
-PIDController pidRoll(0.7, 0, 0, 25, 0.6);
+PIDController pidRoll(0.2, 0, 0, 25, 0.3);
 PIDController pidPitch(0, 0, 0, 25, 0.8);
 PIDController pidYaw(0, 0, 0, 15, 0.8);
 
@@ -355,15 +358,15 @@ void loop() {
     
     // Print status less frequently when armed to reduce spam
     static unsigned long lastStatus = 0;
-    unsigned long statusInterval = armed ? 1 : 1000;
+    unsigned long statusInterval = armed ? 1000 : 1000;
     if (millis() - lastStatus > statusInterval) {
-        printFlightStatus();
+        //printFlightStatus();
         lastStatus = millis();
     }
 
     // Check battery every 5 seconds
     if (millis() - lastBatteryCheck > 5000) {
-        checkBatteryLevel();
+        //checkBatteryLevel();
         updateEnhancedStatus();
         lastBatteryCheck = millis();
     }
@@ -403,24 +406,56 @@ void performFlightControl() {
     float yawCorrection = pidYaw.compute(yawSetpoint, yawRate, dt);
     
     // Updated motor mixing for new coordinate system and FLIPPED roll
-    // Front = -Y axis, Roll about -Y (FLIPPED), Pitch about X
-    // Motor positions: FL=GPIO4, FR=GPIO5, BR=GPIO6, BL=GPIO3
-    int motorFL_raw = throttle + rollCorrection - pitchCorrection - yawCorrection;  // Front Left (FLIPPED roll)
-    int motorFR_raw = throttle - rollCorrection - pitchCorrection + yawCorrection;  // Front Right (FLIPPED roll)
-    int motorBL_raw = throttle + rollCorrection + pitchCorrection + yawCorrection;  // Back Left (FLIPPED roll)
-    int motorBR_raw = throttle - rollCorrection + pitchCorrection - yawCorrection;  // Back Right (FLIPPED roll)
+    // int motorFL_raw = throttle + rollCorrection - pitchCorrection - yawCorrection;
+    // int motorFR_raw = throttle - rollCorrection - pitchCorrection + yawCorrection;
+    // int motorBL_raw = throttle + rollCorrection + pitchCorrection + yawCorrection;
+    // int motorBR_raw = throttle - rollCorrection + pitchCorrection - yawCorrection;
+    int motorFL_correction = + rollCorrection - pitchCorrection - yawCorrection;
+    int motorFR_correction = - rollCorrection - pitchCorrection + yawCorrection;
+    int motorBL_correction = + rollCorrection + pitchCorrection + yawCorrection;
+    int motorBR_correction = - rollCorrection + pitchCorrection - yawCorrection;
+
+    Serial.print("Correction: FL:");
+        Serial.print(motorFL_correction);
+        Serial.print(" FR:"); 
+        Serial.print(motorFR_correction);
+        Serial.print(" BL:");
+        Serial.print(motorBL_correction);
+        Serial.print(" BR:");
+        Serial.print(motorBR_correction);
+        Serial.println();
     
     // Apply motor calibration multipliers
-    motorFL_pwm = (int)(motorFL_raw * motorFL_multiplier);
-    motorFR_pwm = (int)(motorFR_raw * motorFR_multiplier);
-    motorBL_pwm = (int)(motorBL_raw * motorBL_multiplier);
-    motorBR_pwm = (int)(motorBR_raw * motorBR_multiplier);
+    // motorFL_pwm = (int)(motorFL_raw * motorFL_multiplier);
+    // motorFR_pwm = (int)(motorFR_raw * motorFR_multiplier);
+    // motorBL_pwm = (int)(motorBL_raw * motorBL_multiplier);
+    // motorBR_pwm = (int)(motorBR_raw * motorBR_multiplier);
     
-    // Constrain to valid PWM range
-    motorFL_pwm = constrain(motorFL_pwm, MOTOR_IDLE, MAX_THROTTLE);
-    motorFR_pwm = constrain(motorFR_pwm, MOTOR_IDLE, MAX_THROTTLE);
-    motorBL_pwm = constrain(motorBL_pwm, MOTOR_IDLE, MAX_THROTTLE);
-    motorBR_pwm = constrain(motorBR_pwm, MOTOR_IDLE, MAX_THROTTLE);
+    // Store unconstrained values for comparison
+    // int motorFL_unconstrained = motorFL_pwm;
+    // int motorFR_unconstrained = motorFR_pwm;
+    // int motorBL_unconstrained = motorBL_pwm;
+    // int motorBR_unconstrained = motorBR_pwm;
+
+    // Constrain from raw motor range to PWM range (MOTOR_IDLE to MAX_THROTTLE)
+    motorFL_pwm = constrain((throttle + map(motorFL_correction, -100, 100, -200, 200)) * motorFL_multiplier, MOTOR_IDLE, MAX_THROTTLE);
+    motorFR_pwm = constrain((throttle + map(motorFR_correction, -100, 100, -200, 200)) * motorFR_multiplier, MOTOR_IDLE, MAX_THROTTLE);
+    motorBL_pwm = constrain((throttle + map(motorBL_correction, -100, 100, -200, 200)) * motorBL_multiplier, MOTOR_IDLE, MAX_THROTTLE);
+    motorBR_pwm = constrain((throttle + map(motorBR_correction, -100, 100, -200, 200)) * motorBR_multiplier, MOTOR_IDLE, MAX_THROTTLE);
+
+    // Check if any values were constrained and log
+    // if (true || motorFL_unconstrained != motorFL_pwm || motorFR_unconstrained != motorFR_pwm ||
+    //     motorBL_unconstrained != motorBL_pwm || motorBR_unconstrained != motorBR_pwm) {
+    //     Serial.print("CONSTRAIN: FL:");
+    //     Serial.print(motorFL_unconstrained); Serial.print("->"); Serial.print(motorFL_pwm);
+    //     Serial.print(" FR:"); 
+    //     Serial.print(motorFR_unconstrained); Serial.print("->"); Serial.print(motorFR_pwm);
+    //     Serial.print(" BL:");
+    //     Serial.print(motorBL_unconstrained); Serial.print("->"); Serial.print(motorBL_pwm);
+    //     Serial.print(" BR:");
+    //     Serial.print(motorBR_unconstrained); Serial.print("->"); Serial.print(motorBR_pwm);
+    //     Serial.println();
+    // }
     
     // Arduino Core 3.x - write PWM using pin numbers
     ledcWrite(MOTOR_FL_PIN, motorFL_pwm);
@@ -596,7 +631,7 @@ void handleESPNowCommands() {
         case 1: // ARM
             Serial.printf("ARM request: throttle=%d, calibrated=%s\n", 
                           receivedData.throttle, calibrated ? "YES" : "NO");
-            if (receivedData.throttle <= MOTOR_IDLE && calibrated && checkBatteryLevel()) {
+            if (receivedData.throttle <= MOTOR_IDLE && calibrated) {
                 armed = true;
                 resetPIDs();
                 playArmingSequence();  // Add this line
