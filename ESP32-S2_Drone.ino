@@ -72,7 +72,7 @@ private:
     
 public:
     KalmanFilter() {
-        Q_angle = 0.1f;
+        Q_angle = 0.5f;
         Q_bias = 0.1f;
         R_measure = 0.005f;
         angle = 0.0f;
@@ -130,7 +130,7 @@ private:
     float filteredDerivative;                      // Added filteredDerivative
     
 public:
-    PIDController(float p, float i, float d, float intLimit = 50.0, float derivFilter = 0.8) {
+    PIDController(float p, float i, float d, float intLimit = 50.0, float derivFilter = 0.1) {
         kp = p; 
         ki = i; 
         kd = d;
@@ -196,9 +196,9 @@ public:
 
 // Flight control objects
 KalmanFilter kalmanX, kalmanY, kalmanZ;
-PIDController pidRoll(0.2, 0, 0, 25, 0.3);
-PIDController pidPitch(0, 0, 0, 25, 0.8);
-PIDController pidYaw(0, 0, 0, 15, 0.8);
+PIDController pidRoll(0.15, 0.05, 0, 50, 0.0);
+PIDController pidPitch(0.15, 0.05, 0, 50, 0.0);
+PIDController pidYaw(0, 0, 0, 50, 0.0);
 
 // Flight state variables
 float roll = 0, pitch = 0, yaw = 0;
@@ -404,12 +404,7 @@ void performFlightControl() {
     float rollCorrection = pidRoll.compute(rollSetpoint, roll, dt);
     float pitchCorrection = pidPitch.compute(pitchSetpoint, pitch, dt);
     float yawCorrection = pidYaw.compute(yawSetpoint, yawRate, dt);
-    
-    // Updated motor mixing for new coordinate system and FLIPPED roll
-    // int motorFL_raw = throttle + rollCorrection - pitchCorrection - yawCorrection;
-    // int motorFR_raw = throttle - rollCorrection - pitchCorrection + yawCorrection;
-    // int motorBL_raw = throttle + rollCorrection + pitchCorrection + yawCorrection;
-    // int motorBR_raw = throttle - rollCorrection + pitchCorrection - yawCorrection;
+
     int motorFL_correction = + rollCorrection - pitchCorrection - yawCorrection;
     int motorFR_correction = - rollCorrection - pitchCorrection + yawCorrection;
     int motorBL_correction = + rollCorrection + pitchCorrection + yawCorrection;
@@ -424,38 +419,12 @@ void performFlightControl() {
         Serial.print(" BR:");
         Serial.print(motorBR_correction);
         Serial.println();
-    
-    // Apply motor calibration multipliers
-    // motorFL_pwm = (int)(motorFL_raw * motorFL_multiplier);
-    // motorFR_pwm = (int)(motorFR_raw * motorFR_multiplier);
-    // motorBL_pwm = (int)(motorBL_raw * motorBL_multiplier);
-    // motorBR_pwm = (int)(motorBR_raw * motorBR_multiplier);
-    
-    // Store unconstrained values for comparison
-    // int motorFL_unconstrained = motorFL_pwm;
-    // int motorFR_unconstrained = motorFR_pwm;
-    // int motorBL_unconstrained = motorBL_pwm;
-    // int motorBR_unconstrained = motorBR_pwm;
 
     // Constrain from raw motor range to PWM range (MOTOR_IDLE to MAX_THROTTLE)
     motorFL_pwm = constrain((throttle + map(motorFL_correction, -100, 100, -200, 200)) * motorFL_multiplier, MOTOR_IDLE, MAX_THROTTLE);
     motorFR_pwm = constrain((throttle + map(motorFR_correction, -100, 100, -200, 200)) * motorFR_multiplier, MOTOR_IDLE, MAX_THROTTLE);
     motorBL_pwm = constrain((throttle + map(motorBL_correction, -100, 100, -200, 200)) * motorBL_multiplier, MOTOR_IDLE, MAX_THROTTLE);
     motorBR_pwm = constrain((throttle + map(motorBR_correction, -100, 100, -200, 200)) * motorBR_multiplier, MOTOR_IDLE, MAX_THROTTLE);
-
-    // Check if any values were constrained and log
-    // if (true || motorFL_unconstrained != motorFL_pwm || motorFR_unconstrained != motorFR_pwm ||
-    //     motorBL_unconstrained != motorBL_pwm || motorBR_unconstrained != motorBR_pwm) {
-    //     Serial.print("CONSTRAIN: FL:");
-    //     Serial.print(motorFL_unconstrained); Serial.print("->"); Serial.print(motorFL_pwm);
-    //     Serial.print(" FR:"); 
-    //     Serial.print(motorFR_unconstrained); Serial.print("->"); Serial.print(motorFR_pwm);
-    //     Serial.print(" BL:");
-    //     Serial.print(motorBL_unconstrained); Serial.print("->"); Serial.print(motorBL_pwm);
-    //     Serial.print(" BR:");
-    //     Serial.print(motorBR_unconstrained); Serial.print("->"); Serial.print(motorBR_pwm);
-    //     Serial.println();
-    // }
     
     // Arduino Core 3.x - write PWM using pin numbers
     ledcWrite(MOTOR_FL_PIN, motorFL_pwm);
