@@ -1,20 +1,24 @@
 # Final Year Project
 
-This repository contains the `MoCap` project, split into a Python backend and a React frontend.
+This repository contains the `MoCap` project, split into a Python backend, a React frontend, and an ESP32-S3 serial receiver sketch.
 
 ## Structure
 
 - `backend/`: motion-capture logic, camera calibration files, and the main tracking server in `index.py`
-- `frontend/`: Vite + React client
+- `frontend/`: Vite + React client for activation, serial selection, and PID input
+- `esp32-s3-sender/`: Arduino sketch for the ESP32-S3 USB serial receiver and ESP-NOW transmitter
+- `esp32-s2-drone/`: Arduino sketch for the ESP32-S2 ESP-NOW receiver
 
 ## Backend
 
-The backend in `backend/index.py` uses OpenCV, NumPy, `pseyepy`, and `websockets` to:
+The backend in `backend/index.py` uses OpenCV, NumPy, `pseyepy`, `websockets`, and `pyserial` to:
 
 - load camera intrinsics and extrinsics from `backend/calibration/`
-- detect LED points from connected cameras
+- verify that all three cameras are connected before allowing transmission
+- detect LED points from the three camera feeds
 - estimate 3D pose from multi-view triangulation
-- serve pose updates over WebSocket on `ws://localhost:8765`
+- accept activation, serial settings, and PID values from the frontend over WebSocket
+- stream newline-delimited JSON payloads to the ESP32-S3 over the selected serial port only when the camera and serial gates are both ready
 
 Install the required Python packages in your environment before running it.
 
@@ -29,6 +33,33 @@ cd frontend
 npm install
 npm run dev
 ```
+
+The UI connects to `ws://localhost:8765` and owns all operator input:
+
+- serial port selection
+- baud rate
+- PID parameters for `x`, `y`, `z`, and `yaw`
+- activation and deactivation of serial transmission
+
+## ESP32 boards
+
+Flash `esp32-s3-sender/esp32-s3-sender.ino` to the ESP32-S3. It listens for newline-delimited JSON from the Python server over USB serial and forwards each full line to the ESP32-S2 over ESP-NOW.
+
+Flash `esp32-s2-drone/esp32-s2-drone.ino` to the ESP32-S2. It receives ESP-NOW messages and prints each payload to its USB serial monitor.
+
+Setup notes:
+
+- Open the ESP32-S2 serial monitor once after flashing and note the printed station MAC address.
+- Copy that MAC address into `DRONE_MAC_ADDRESS` in `esp32-s3-sender/esp32-s3-sender.ino`.
+- ESP-NOW payloads in this implementation are limited to 239 characters plus the null terminator.
+
+## Run flow
+
+1. Start the Python backend from the repository root: `python backend/index.py`
+2. Start the frontend from `frontend/`: `npm run dev`
+3. Connect the ESP32-S3 to the computer over USB
+4. Open the frontend, refresh serial ports, choose the ESP32-S3 COM port, enter PID values, and activate the stream
+5. The backend will only send payloads when all three cameras are connected and pose tracking is ready
 
 ## Notes
 
