@@ -5,8 +5,8 @@ import json
 from scipy.spatial.transform import Rotation as R
 
 # --- SETTINGS ---
-PARAMS_PATH = "MoCap/calibration/camera_intrinsics.json"
-OUTPUT_PATH = "MoCap/calibration/camera_extrinsics.json"
+PARAMS_PATH = "backend/calibration/camera_intrinsics.json"
+OUTPUT_PATH = "backend/calibration/camera_extrinsics.json"
 MARKER_SIZE = 0.16  
 DICT_TYPE = cv.aruco.DICT_4X4_1000
 TARGET_CAPTURES = 3
