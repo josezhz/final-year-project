@@ -5,6 +5,7 @@ const EMPTY_TELEMETRY = {
   position: { x: 0, y: 0, z: 0 },
   rotation: { yaw: 0, pitch: 0, roll: 0 },
   error: 0,
+  solved_led_coordinates: [],
   detected_leds_per_camera: [0, 0, 0],
   ready_to_send: false,
 };
@@ -518,6 +519,19 @@ function App() {
                 <span className="meta-label">LEDs per camera</span>
                 <strong>{telemetry.detected_leds_per_camera.join(' / ')}</strong>
               </div>
+            </div>
+
+            <div className="led-coords">
+              <span className="meta-label">Solved LED coordinates (world)</span>
+              {telemetry.solved_led_coordinates?.length ? (
+                telemetry.solved_led_coordinates.map((led) => (
+                  <strong key={led.label}>
+                    {led.label}: ({formatNumber(led.x, 4)}, {formatNumber(led.y, 4)}, {formatNumber(led.z, 4)})
+                  </strong>
+                ))
+              ) : (
+                <strong>No solved points</strong>
+              )}
             </div>
           </article>
 

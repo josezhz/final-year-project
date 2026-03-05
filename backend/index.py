@@ -1,3 +1,4 @@
+# ... (keeping all imports and other code the same)
 import asyncio
 import base64
 import json
@@ -5,7 +6,6 @@ import math
 import time
 from dataclasses import dataclass, field
 from http import HTTPStatus
-from itertools import permutations
 from pathlib import Path
 
 import cv2 as cv
@@ -18,7 +18,7 @@ from websockets.http11 import Response
 try:
     import serial
     from serial.tools import list_ports
-except ImportError:  # pragma: no cover - depends on local environment
+except ImportError:
     serial = None
     list_ports = None
 
@@ -37,15 +37,15 @@ TRACKING_HZ = 20
 SERIAL_REFRESH_SECONDS = 1.0
 DEFAULT_BAUD_RATE = 115200
 ALLOW_DEFAULT_TELEMETRY_SEND = True
-POSITION_JUMP_WEIGHT = 15.0
+POSITION_JUMP_WEIGHT = 2.0
 PREVIEW_HZ = 5
 
-# Front LED, back-left LED, back-right LED in meters.
+
 DRONE_LED_MODEL = np.array(
     [
-        [0.050, 0.000, 0.025],
-        [0.000,-0.050, 0.025],
-        [0.000, 0.050, 0.025],
+        [0.050, 0.000, 0.025],   # Front
+        [0.000, -0.050, 0.025],  # Back-Right
+        [0.000, 0.050, 0.025],   # Back-Left
     ],
     dtype=np.float32,
 )
@@ -54,16 +54,18 @@ DEFAULT_TELEMETRY = {
     "position": {"x": 0.0, "y": 0.0, "z": 0.0},
     "rotation": {"yaw": 0.0, "pitch": 0.0, "roll": 0.0},
     "error": 0.0,
+    "solved_led_coordinates": [],
     "detected_leds_per_camera": [0, 0, 0],
     "ready_to_send": False,
     "using_default_data": True,
 }
 PREVIEW_WIDTH = 240
 PREVIEW_JPEG_QUALITY = 45
-MAX_LED_REORDER_COST_PIXELS = 80.0
+MAX_LED_REORDER_COST_PIXELS = 30.0
+MAPPING_TEMPORAL_WEIGHT = 120.0
 
 
-def encode_preview_frame(frame, leds=None):
+def encode_preview_frame(frame, leds=None, labels=None):
     preview = frame
     height, width = preview.shape[:2]
     if width > PREVIEW_WIDTH:
@@ -84,9 +86,12 @@ def encode_preview_frame(frame, leds=None):
     for led_index, (x_coord, y_coord) in enumerate(leds or [], start=1):
         center = (int(round(x_coord * scale_x)), int(round(y_coord * scale_y)))
         cv.circle(preview, center, 8, (0, 220, 255), 2)
+        label = str(led_index)
+        if labels and (led_index - 1) < len(labels):
+            label = str(labels[led_index - 1])
         cv.putText(
             preview,
-            str(led_index),
+            label,
             (center[0] + 10, center[1] - 10),
             cv.FONT_HERSHEY_SIMPLEX,
             0.5,
@@ -128,6 +133,7 @@ def load_json(path: Path):
 
 
 def triangulate_n_views(proj_mats, pts_2d):
+    """Triangulate 3D point from multiple 2D observations using DLT."""
     a_matrix = []
     for proj_mat, (u_coord, v_coord) in zip(proj_mats, pts_2d):
         a_matrix.append(u_coord * proj_mat[2, :] - proj_mat[0, :])
@@ -139,6 +145,7 @@ def triangulate_n_views(proj_mats, pts_2d):
 
 
 def project_world_point(proj_mat, point_world):
+    """Project 3D world point to 2D image coordinates."""
     homogeneous_point = np.append(np.asarray(point_world, dtype=np.float32), 1.0)
     projected = proj_mat @ homogeneous_point
     if abs(projected[2]) < 1e-6:
@@ -146,63 +153,34 @@ def project_world_point(proj_mat, point_world):
     return projected[:2] / projected[2]
 
 
-def reorder_leds_by_prediction(all_cam_leds, proj_mats, rotation, translation):
-    transformed_model = (rotation @ DRONE_LED_MODEL.T).T + translation
-    reordered_leds = []
-
-    for camera_leds, proj_mat in zip(all_cam_leds, proj_mats):
-        predicted_leds = [
-            project_world_point(proj_mat, model_point) for model_point in transformed_model
-        ]
-        if any(predicted is None for predicted in predicted_leds):
-            return all_cam_leds, False
-
-        best_perm = None
-        best_cost = float("inf")
-        for permutation_index in permutations(range(MAX_LEDS)):
-            cost = 0.0
-            for model_index, led_index in enumerate(permutation_index):
-                detected = np.array(camera_leds[led_index], dtype=np.float32)
-                predicted = np.array(predicted_leds[model_index], dtype=np.float32)
-                cost += float(np.linalg.norm(detected - predicted))
-            if cost < best_cost:
-                best_cost = cost
-                best_perm = permutation_index
-
-        if best_perm is None or (best_cost / MAX_LEDS) > MAX_LED_REORDER_COST_PIXELS:
-            return all_cam_leds, False
-
-        reordered_leds.append([camera_leds[index] for index in best_perm])
-
-    return reordered_leds, True
-
-
-def get_euler_angles(rotation_matrix):
-    sy = math.sqrt(rotation_matrix[0, 0] ** 2 + rotation_matrix[1, 0] ** 2)
-    if sy > 1e-6:
-        x_rot = math.atan2(rotation_matrix[2, 1], rotation_matrix[2, 2])
-        y_rot = math.atan2(-rotation_matrix[2, 0], sy)
-        z_rot = math.atan2(rotation_matrix[1, 0], rotation_matrix[0, 0])
+def rotation_matrix_to_euler_zyx(R):
+    """
+    Convert rotation matrix to Euler angles (ZYX intrinsic / yaw-pitch-roll).
+    Returns (yaw, pitch, roll) in degrees.
+    """
+    sy = math.sqrt(R[0, 0]**2 + R[1, 0]**2)
+    
+    singular = sy < 1e-6
+    
+    if not singular:
+        roll = math.atan2(R[2, 1], R[2, 2])
+        pitch = math.atan2(-R[2, 0], sy)
+        yaw = math.atan2(R[1, 0], R[0, 0])
     else:
-        x_rot = math.atan2(-rotation_matrix[1, 2], rotation_matrix[1, 1])
-        y_rot = math.atan2(-rotation_matrix[2, 0], sy)
-        z_rot = 0
-
-    return np.degrees([z_rot, y_rot, x_rot])
-
-
-def get_rotation_delta_degrees(reference_rotation, candidate_rotation):
-    relative_rotation = reference_rotation.T @ candidate_rotation
-    trace_value = np.trace(relative_rotation)
-    cos_theta = max(-1.0, min(1.0, (trace_value - 1.0) / 2.0))
-    return math.degrees(math.acos(cos_theta))
+        roll = math.atan2(-R[1, 2], R[1, 1])
+        pitch = math.atan2(-R[2, 0], sy)
+        yaw = 0
+    
+    return np.degrees([yaw, pitch, roll])
 
 
 def wrap_angle_degrees(angle):
+    """Wrap angle to [-180, 180] range."""
     return ((angle + 180.0) % 360.0) - 180.0
 
 
 def unwrap_angle_degrees(previous_angle, next_angle):
+    """Unwrap angle to prevent jumps at ±180 boundary."""
     return previous_angle + wrap_angle_degrees(next_angle - previous_angle)
 
 
@@ -233,27 +211,208 @@ class ScalarKalmanFilter:
         )
         self.value += kalman_gain * (measurement - self.value)
         self.error_covariance *= 1.0 - kalman_gain
+        
         return self.value
 
 
 def detect_leds(frame):
+    """Detect LED positions and sort them spatially (clockwise)."""
     _, mask = cv.threshold(frame, MIN_BRIGHTNESS, 255, cv.THRESH_BINARY)
     contours, _ = cv.findContours(mask, cv.RETR_EXTERNAL, cv.CHAIN_APPROX_SIMPLE)
 
-    leds = []
+    led_candidates = []
     for contour in contours:
         moments = cv.moments(contour)
         if moments["m00"] > 2:
-            leds.append(
-                {
-                    "x": moments["m10"] / moments["m00"],
-                    "y": moments["m01"] / moments["m00"],
-                    "area": moments["m00"],
-                }
-            )
+            led_candidates.append({
+                "x": moments["m10"] / moments["m00"],
+                "y": moments["m01"] / moments["m00"]
+            })
 
-    leds.sort(key=lambda led: led["area"], reverse=True)
-    return [(led["x"], led["y"]) for led in leds[:MAX_LEDS]]
+    if len(led_candidates) < MAX_LEDS:
+        return [(l["x"], l["y"]) for l in led_candidates]
+
+    # 1. Take top 3 by area/intensity if more than 3 found (optional filter)
+    # For now, we assume the 3 brightest blobs are the LEDs
+    top_three = led_candidates[:MAX_LEDS]
+
+    # 2. Calculate Centroid of the 3 points
+    cx = sum(l["x"] for l in top_three) / MAX_LEDS
+    cy = sum(l["y"] for l in top_three) / MAX_LEDS
+
+    # 3. Sort by angle around centroid (atan2(y-cy, x-cx))
+    # This creates a consistent clockwise or counter-clockwise sequence
+    top_three.sort(key=lambda l: math.atan2(l["y"] - cy, l["x"] - cx))
+
+    return [(l["x"], l["y"]) for l in top_three]
+
+
+def undistort_led_points(led_points, camera_matrix, dist_coeff):
+    """Undistort 2D pixel observations while keeping pixel coordinate output."""
+    if not led_points:
+        return []
+
+    points = np.array(led_points, dtype=np.float32).reshape(-1, 1, 2)
+    undistorted = cv.undistortPoints(
+        points,
+        np.asarray(camera_matrix, dtype=np.float32),
+        np.asarray(dist_coeff, dtype=np.float32),
+        P=np.asarray(camera_matrix, dtype=np.float32),
+    )
+    return [tuple(point[0]) for point in undistorted]
+
+
+def solve_pose_procrustes(points_3d, model_points):
+    """Solve for rotation and translation using Procrustes."""
+    points_3d = np.asarray(points_3d, dtype=np.float32)
+    model_points = np.asarray(model_points, dtype=np.float32)
+    
+    centroid_data = np.mean(points_3d, axis=0)
+    centroid_model = np.mean(model_points, axis=0)
+    
+    data_centered = points_3d - centroid_data
+    model_centered = model_points - centroid_model
+    
+    H = model_centered.T @ data_centered
+    U, _, Vt = np.linalg.svd(H)
+    
+    R = Vt.T @ U.T
+    
+    if np.linalg.det(R) < 0:
+        Vt[-1, :] *= -1
+        R = Vt.T @ U.T
+    
+    t = centroid_data - R @ centroid_model
+    
+    return R, t
+
+
+def compute_reprojection_error(points_3d, model_points):
+    """Compute RMS distance between points."""
+    return np.sqrt(np.mean(np.sum((points_3d - model_points)**2, axis=1)))
+
+
+def cyclic_shift(points_2d, shift):
+    """Rotate a clockwise point list while preserving clockwise order."""
+    return [points_2d[(index + shift) % MAX_LEDS] for index in range(MAX_LEDS)]
+
+
+def mapping_reprojection_cost(mapped_leds, proj_mats):
+    """
+    Score a cross-camera LED mapping.
+    Lower is better: RMS reprojection error in pixels across all LEDs/cameras.
+    """
+    squared_error_sum = 0.0
+    observations = 0
+
+    for led_idx in range(MAX_LEDS):
+        points_2d = [cam_leds[led_idx] for cam_leds in mapped_leds]
+        point_3d = triangulate_n_views(proj_mats, points_2d)
+
+        for proj_mat, observed in zip(proj_mats, points_2d):
+            projected = project_world_point(proj_mat, point_3d)
+            if projected is None:
+                return float("inf")
+
+            diff = projected - np.asarray(observed, dtype=np.float32)
+            squared_error_sum += float(diff[0] ** 2 + diff[1] ** 2)
+            observations += 1
+
+    if observations == 0:
+        return float("inf")
+
+    return math.sqrt(squared_error_sum / observations)
+
+
+def triangulate_mapped_leds(mapped_leds, proj_mats):
+    """Triangulate one 3D point for each mapped LED index."""
+    points = []
+    for led_idx in range(MAX_LEDS):
+        pts_2d = [cam_leds[led_idx] for cam_leds in mapped_leds]
+        points.append(triangulate_n_views(proj_mats, pts_2d))
+    return np.array(points, dtype=np.float32)
+
+
+def mapping_temporal_penalty(candidate_points, previous_led_points):
+    """
+    Penalize sudden A/B/C label swaps between frames.
+    Returns a penalty in pseudo-pixel units.
+    """
+    if previous_led_points is None:
+        return 0.0
+    previous_led_points = np.asarray(previous_led_points, dtype=np.float32)
+    if previous_led_points.shape != candidate_points.shape:
+        return 0.0
+
+    rms_delta_m = float(
+        np.sqrt(np.mean(np.sum((candidate_points - previous_led_points) ** 2, axis=1)))
+    )
+    return MAPPING_TEMPORAL_WEIGHT * rms_delta_m
+
+
+def find_best_clockwise_mapping(all_cam_leds, proj_mats, previous_led_points=None):
+    """
+    Since camera view is always from above, only cyclic permutations are valid.
+    Search per-camera cyclic shifts and select the minimum reprojection-cost mapping.
+    """
+    best_cost = float("inf")
+    best_reprojection_cost = float("inf")
+    best_leds = None
+    best_shifts = [0 for _ in all_cam_leds]
+    best_points = None
+
+    shift_ranges = [range(MAX_LEDS) for _ in all_cam_leds]
+    # 3 cameras x 3 LEDs -> 3^3 = 27 combinations.
+    for shifts in np.ndindex(*[len(options) for options in shift_ranges]):
+        mapped_leds = [
+            cyclic_shift(cam_leds, shift)
+            for cam_leds, shift in zip(all_cam_leds, shifts)
+        ]
+        candidate_points = triangulate_mapped_leds(mapped_leds, proj_mats)
+        reprojection_cost = mapping_reprojection_cost(mapped_leds, proj_mats)
+        temporal_penalty = mapping_temporal_penalty(candidate_points, previous_led_points)
+        cost = reprojection_cost + temporal_penalty
+
+        if cost < best_cost:
+            best_cost = cost
+            best_reprojection_cost = reprojection_cost
+            best_leds = mapped_leds
+            best_shifts = [int(value) for value in shifts]
+            best_points = candidate_points
+
+    return best_leds, best_reprojection_cost, best_shifts, best_points
+
+
+def solve_led_positions(all_cam_leds, proj_mats, previous_led_points=None):
+    """
+    Solve LED 3D positions from multi-view geometry only (no drone model usage).
+    Returns mapped observations, mapping quality, and F/R/L 3D coordinates.
+    """
+    mapped_leds, mapping_cost, mapping_shifts, candidate_points = find_best_clockwise_mapping(
+        all_cam_leds,
+        proj_mats,
+        previous_led_points=previous_led_points,
+    )
+    if mapped_leds is None:
+        return None
+
+    solved_led_coordinates = [
+        {
+            "label": label,
+            "x": round(float(point[0]), 4),
+            "y": round(float(point[1]), 4),
+            "z": round(float(point[2]), 4),
+        }
+        for label, point in zip(["F", "R", "L"], candidate_points)
+    ]
+
+    return {
+        "mapped_leds": mapped_leds,
+        "mapping_cost": float(mapping_cost),
+        "mapping_shifts": [int(value) for value in mapping_shifts],
+        "candidate_points": candidate_points,
+        "solved_led_coordinates": solved_led_coordinates,
+    }
 
 
 def solve_pose(
@@ -261,82 +420,39 @@ def solve_pose(
     proj_mats,
     previous_rotation=None,
     previous_position=None,
-    permutations_to_try=None,
+    precomputed_led_solution=None,
 ):
-    best_error = float("inf")
-    best_fit_error = float("inf")
-    best_pose = None
-    best_rotation_delta = float("inf")
-    best_position_delta = float("inf")
+    """
+    Solve 6DOF pose with clockwise-only mapping search.
 
-    if permutations_to_try is None:
-        permutations_to_try = [
-            (perm_one, perm_two, perm_three)
-            for perm_one in permutations(range(MAX_LEDS))
-            for perm_two in permutations(range(MAX_LEDS))
-            for perm_three in permutations(range(MAX_LEDS))
-        ]
-
-    for perm_one, perm_two, perm_three in permutations_to_try:
-                candidate_points = []
-                for index in range(MAX_LEDS):
-                    pts_2d = [
-                        all_cam_leds[0][perm_one[index]],
-                        all_cam_leds[1][perm_two[index]],
-                        all_cam_leds[2][perm_three[index]],
-                    ]
-                    candidate_points.append(triangulate_n_views(proj_mats, pts_2d))
-
-                candidate_points = np.array(candidate_points, dtype=np.float32)
-                centroid_model = np.mean(DRONE_LED_MODEL, axis=0)
-                centroid_data = np.mean(candidate_points, axis=0)
-
-                model_centered = DRONE_LED_MODEL - centroid_model
-                data_centered = candidate_points - centroid_data
-
-                covariance = model_centered.T @ data_centered
-                u_mat, _, vt = np.linalg.svd(covariance)
-                rotation = vt.T @ u_mat.T
-
-                if np.linalg.det(rotation) < 0:
-                    vt[-1, :] *= -1
-                    rotation = vt.T @ u_mat.T
-
-                translation = centroid_data - rotation @ centroid_model
-                transformed = (rotation @ DRONE_LED_MODEL.T).T + translation
-                fit_error = np.mean(np.linalg.norm(candidate_points - transformed, axis=1))
-                rotation_delta = (
-                    get_rotation_delta_degrees(previous_rotation, rotation)
-                    if previous_rotation is not None
-                    else 0.0
-                )
-                position_delta = (
-                    float(np.linalg.norm(translation - previous_position))
-                    if previous_position is not None
-                    else 0.0
-                )
-                weighted_error = fit_error + POSITION_JUMP_WEIGHT * position_delta
-
-                if weighted_error < best_error - 1e-6 or (
-                    abs(weighted_error - best_error) <= 1e-6
-                    and (
-                        rotation_delta < best_rotation_delta
-                        or (
-                            abs(rotation_delta - best_rotation_delta) <= 1e-6
-                            and position_delta < best_position_delta
-                        )
-                    )
-                ):
-                    best_error = weighted_error
-                    best_fit_error = fit_error
-                    best_rotation_delta = rotation_delta
-                    best_position_delta = position_delta
-                    best_pose = (rotation, translation)
-
-    if not best_pose or best_fit_error >= MAX_FIT_ERROR:
+    Cameras are above the drone, so each camera sees the same clockwise sequence.
+    The unknown is the per-camera starting index (3 cyclic options per camera).
+    We choose the mapping with minimum cross-camera reprojection error.
+    """
+    led_solution = precomputed_led_solution or solve_led_positions(all_cam_leds, proj_mats)
+    if led_solution is None:
         return None
 
-    rotation, translation = best_pose
+    mapped_leds = led_solution["mapped_leds"]
+    mapping_cost = led_solution["mapping_cost"]
+    mapping_shifts = led_solution["mapping_shifts"]
+    candidate_points = led_solution["candidate_points"]
+    solved_led_coordinates = led_solution["solved_led_coordinates"]
+
+    if mapping_cost >= MAX_LED_REORDER_COST_PIXELS:
+        return None
+
+    # Solve for pose using Procrustes alignment
+    rotation, translation = solve_pose_procrustes(candidate_points, DRONE_LED_MODEL)
+
+    # Compute fit error
+    transformed_model = (rotation @ DRONE_LED_MODEL.T).T + translation
+    fit_error = compute_reprojection_error(candidate_points, transformed_model)
+
+    # Check if fit is acceptable
+    if fit_error >= MAX_FIT_ERROR:
+        return None
+
     return {
         "position": {
             "x": round(float(translation[0]), 4),
@@ -345,7 +461,9 @@ def solve_pose(
         },
         "translation_vector": translation,
         "rotation_matrix": rotation,
-        "error": round(float(best_fit_error), 5),
+        "error": round(float(max(fit_error, mapping_cost)), 5),
+        "solved_led_coordinates": solved_led_coordinates,
+        "mapping_shifts": [int(value) for value in mapping_shifts],
         "detected_leds_per_camera": [len(leds) for leds in all_cam_leds],
     }
 
@@ -408,7 +526,7 @@ class SerialBridge:
             self.baud_rate = int(baud_rate)
             self.last_error = ""
             return True
-        except Exception as exc:  # pragma: no cover - depends on hardware
+        except Exception as exc:
             self.connection = None
             self.port = ""
             self.last_error = f"Serial connection failed: {exc}"
@@ -436,7 +554,7 @@ class SerialBridge:
             self.connection.flush()
             self.last_error = ""
             return True
-        except Exception as exc:  # pragma: no cover - depends on hardware
+        except Exception as exc:
             self.last_error = f"Serial write failed: {exc}"
             self.disconnect()
             return False
@@ -450,22 +568,28 @@ class MotionCaptureEngine:
         self.camera_ids = []
         self.camera_error = ""
         self.proj_mats = []
+        self.camera_matrices = []
+        self.dist_coeffs = []
         self.last_rotation = None
         self.last_translation = None
-        self.last_relative_angles = None
-        self.last_filtered_pose = None
+        self.last_led_points = None
+        self.last_unwrapped_angles = None
         self.latest_preview_frames = []
         self.last_preview_update = 0.0
         self.camera_pose_summary = []
+        
+        # Position filters
         self.position_filters = {
-            "x": ScalarKalmanFilter(1e-4, 4e-4),
-            "y": ScalarKalmanFilter(1e-4, 4e-4),
-            "z": ScalarKalmanFilter(1e-4, 4e-4),
+            "x": ScalarKalmanFilter(1e-4, 2e-3),
+            "y": ScalarKalmanFilter(1e-4, 2e-3),
+            "z": ScalarKalmanFilter(1e-4, 2e-3),
         }
+        
+        # Attitude filters
         self.attitude_filters = {
-            "yaw": ScalarKalmanFilter(0.8, 9.0),
-            "pitch": ScalarKalmanFilter(0.5, 6.0),
-            "roll": ScalarKalmanFilter(0.5, 6.0),
+            "yaw": ScalarKalmanFilter(1.0, 2.0),
+            "pitch": ScalarKalmanFilter(1.0, 2.0),
+            "roll": ScalarKalmanFilter(1.0, 2.0),
         }
 
     def ensure_camera(self):
@@ -485,13 +609,20 @@ class MotionCaptureEngine:
             self.camera = camera
             self.camera_error = ""
             self.proj_mats = []
+            self.camera_matrices = []
+            self.dist_coeffs = []
             self.camera_pose_summary = []
+            
             for index in range(EXPECTED_CAMERAS):
                 cam_key = f"cam{index + 1}"
-                intrinsic = np.array(self.intrinsics[cam_key]["camera_matrix"])
+                intrinsic = np.array(self.intrinsics[cam_key]["camera_matrix"], dtype=np.float32)
+                dist_coeff = np.array(self.intrinsics[cam_key]["dist_coeff"], dtype=np.float32)
                 pose_cam_to_world = np.array(self.extrinsics[cam_key]["pose_matrix"])
                 pose_world_to_cam = np.linalg.inv(pose_cam_to_world)
                 self.proj_mats.append(intrinsic @ pose_world_to_cam[:3, :])
+                self.camera_matrices.append(intrinsic)
+                self.dist_coeffs.append(dist_coeff)
+                
                 self.camera_pose_summary.append(
                     {
                         "camera": cam_key,
@@ -507,8 +638,14 @@ class MotionCaptureEngine:
                         },
                     }
                 )
+            
+            print("LED Model loaded:")
+            print(f"  Front: {DRONE_LED_MODEL[0]}")
+            print(f"  Back-Right: {DRONE_LED_MODEL[1]}")
+            print(f"  Back-Left: {DRONE_LED_MODEL[2]}")
+            
             return True
-        except Exception as exc:  # pragma: no cover - depends on hardware
+        except Exception as exc:
             self.camera = None
             self.camera_ids = []
             self.camera_error = f"Camera initialisation failed: {exc}"
@@ -522,59 +659,68 @@ class MotionCaptureEngine:
                 pass
         self.camera = None
         self.camera_ids = []
+        self.camera_matrices = []
+        self.dist_coeffs = []
         self.last_rotation = None
         self.last_translation = None
-        self.last_relative_angles = None
-        self.last_filtered_pose = None
+        self.last_led_points = None
+        self.last_unwrapped_angles = None
         self.latest_preview_frames = []
         self.last_preview_update = 0.0
         self.camera_pose_summary = []
+        
         for filter_instance in self.position_filters.values():
             filter_instance.reset()
         for filter_instance in self.attitude_filters.values():
             filter_instance.reset()
 
-    def filter_pose(self, translation, relative_rotation):
-        raw_yaw, raw_pitch, raw_roll = get_euler_angles(relative_rotation)
-        angle_measurements = {
-            "yaw": float(raw_yaw),
-            "pitch": float(raw_pitch),
-            "roll": float(raw_roll),
-        }
-
-        if self.last_relative_angles is None:
-            unwrapped_angles = dict(angle_measurements)
+    def filter_pose(self, translation, rotation_matrix):
+        """Apply Kalman filtering."""
+        yaw_raw, pitch_raw, roll_raw = rotation_matrix_to_euler_zyx(rotation_matrix)
+        
+        # Unwrap angles
+        if self.last_unwrapped_angles is None:
+            unwrapped_angles = {
+                "yaw": yaw_raw,
+                "pitch": pitch_raw,
+                "roll": roll_raw,
+            }
         else:
             unwrapped_angles = {
-                axis: unwrap_angle_degrees(self.last_relative_angles[axis], value)
-                for axis, value in angle_measurements.items()
+                "yaw": unwrap_angle_degrees(self.last_unwrapped_angles["yaw"], yaw_raw),
+                "pitch": unwrap_angle_degrees(self.last_unwrapped_angles["pitch"], pitch_raw),
+                "roll": unwrap_angle_degrees(self.last_unwrapped_angles["roll"], roll_raw),
             }
-
+        
+        self.last_unwrapped_angles = unwrapped_angles.copy()
+        
+        # Filter
         filtered_position = {
-            axis: round(self.position_filters[axis].update(float(value)), 4)
-            for axis, value in zip(("x", "y", "z"), translation)
+            "x": round(self.position_filters["x"].update(float(translation[0])), 4),
+            "y": round(self.position_filters["y"].update(float(translation[1])), 4),
+            "z": round(self.position_filters["z"].update(float(translation[2])), 4),
         }
-        filtered_angles = {
-            axis: round(
-                wrap_angle_degrees(self.attitude_filters[axis].update(unwrapped_angles[axis])),
-                2,
-            )
+        
+        filtered_angles_unwrapped = {
+            axis: self.attitude_filters[axis].update(unwrapped_angles[axis])
             for axis in ("yaw", "pitch", "roll")
         }
-        self.last_relative_angles = unwrapped_angles
-        self.last_filtered_pose = {
-            "position": filtered_position,
-            "rotation": filtered_angles,
+        
+        filtered_angles = {
+            axis: round(wrap_angle_degrees(value), 2)
+            for axis, value in filtered_angles_unwrapped.items()
         }
+        
         return filtered_position, filtered_angles
 
     def read_pose(self):
+        """Main tracking loop."""
         if not self.ensure_camera():
             return None
 
         try:
             frames, _ = self.camera.read()
-        except Exception as exc:  # pragma: no cover - depends on hardware
+        except Exception as exc:
             self.camera_error = f"Camera read failed: {exc}"
             self.close()
             return None
@@ -590,14 +736,16 @@ class MotionCaptureEngine:
 
         selected_frames = frames[:EXPECTED_CAMERAS]
         all_cam_leds = [detect_leds(frame.copy()) for frame in selected_frames]
-        used_prediction_tracking = False
-        if self.last_rotation is not None and self.last_translation is not None:
-            all_cam_leds, used_prediction_tracking = reorder_leds_by_prediction(
+        all_cam_leds_undistorted = [
+            undistort_led_points(leds, camera_matrix, dist_coeff)
+            for leds, camera_matrix, dist_coeff in zip(
                 all_cam_leds,
-                self.proj_mats,
-                self.last_rotation,
-                self.last_translation,
+                self.camera_matrices,
+                self.dist_coeffs,
             )
+        ]
+        
+        # Update previews
         now = time.time()
         if (
             not self.latest_preview_frames
@@ -615,52 +763,90 @@ class MotionCaptureEngine:
         else:
             for preview, leds in zip(self.latest_preview_frames, all_cam_leds):
                 preview["ledCount"] = len(leds)
-        if not all(len(leds) == MAX_LEDS for leds in all_cam_leds):
+        
+        # Check LED detection
+        if not all(len(leds) == MAX_LEDS for leds in all_cam_leds_undistorted):
             self.camera_error = "Waiting for all three cameras to detect exactly three LEDs."
             return {
                 "position": {"x": 0.0, "y": 0.0, "z": 0.0},
                 "rotation": {"yaw": 0.0, "pitch": 0.0, "roll": 0.0},
                 "error": 0.0,
+                "solved_led_coordinates": [],
                 "detected_leds_per_camera": [len(leds) for leds in all_cam_leds],
                 "ready_to_send": False,
             }
 
-        identity_permutations = [(tuple(range(MAX_LEDS)),) * EXPECTED_CAMERAS]
-        pose = solve_pose(
-            all_cam_leds,
+        led_solution = solve_led_positions(
+            all_cam_leds_undistorted,
             self.proj_mats,
-            previous_rotation=self.last_rotation,
-            previous_position=self.last_translation,
-            permutations_to_try=identity_permutations if used_prediction_tracking else None,
+            previous_led_points=self.last_led_points,
         )
-        if pose is None and used_prediction_tracking:
-            pose = solve_pose(
-                all_cam_leds,
-                self.proj_mats,
-                previous_rotation=self.last_rotation,
-                previous_position=self.last_translation,
-            )
+        solved_led_coordinates = (
+            led_solution["solved_led_coordinates"] if led_solution is not None else []
+        )
+        if led_solution is not None:
+            self.last_led_points = np.asarray(
+                led_solution["candidate_points"], dtype=np.float32
+            ).copy()
+
+        # Solve pose
+        pose = solve_pose(
+            all_cam_leds_undistorted,
+            self.proj_mats,
+            self.last_rotation,
+            self.last_translation,
+            precomputed_led_solution=led_solution,
+        )
+        
         if pose is None:
             self.camera_error = "Pose solve failed or exceeded the fitting threshold."
             return {
                 "position": {"x": 0.0, "y": 0.0, "z": 0.0},
                 "rotation": {"yaw": 0.0, "pitch": 0.0, "roll": 0.0},
-                "error": 0.0,
+                "error": (
+                    round(float(led_solution["mapping_cost"]), 5)
+                    if led_solution is not None
+                    else 0.0
+                ),
+                "solved_led_coordinates": solved_led_coordinates,
                 "detected_leds_per_camera": [len(leds) for leds in all_cam_leds],
                 "ready_to_send": False,
             }
 
+        # Extract and filter
         raw_rotation = pose.pop("rotation_matrix")
         translation = pose.pop("translation_vector")
-        relative_rotation = raw_rotation
-        filtered_position, filtered_angles = self.filter_pose(translation, relative_rotation)
+        mapping_shifts = pose.pop("mapping_shifts", None)
+        if mapping_shifts is None:
+            mapping_shifts = [0 for _ in all_cam_leds]
+        filtered_position, filtered_angles = self.filter_pose(translation, raw_rotation)
+        
         pose["position"] = filtered_position
         pose["rotation"] = filtered_angles
-        pose["used_prediction_tracking"] = used_prediction_tracking
+
+        # Relabel preview LEDs using solved semantic ordering: Front, Right, Left.
+        semantic_labels = ["F", "R", "L"]
+        mapped_raw_leds = [
+            cyclic_shift(leds, int(shift))
+            for leds, shift in zip(all_cam_leds, mapping_shifts)
+        ]
+        self.latest_preview_frames = [
+            {
+                "camera": f"cam{index + 1}",
+                "image": encode_preview_frame(frame, leds, labels=semantic_labels),
+                "ledCount": len(leds),
+            }
+            for index, (frame, leds) in enumerate(zip(selected_frames, mapped_raw_leds))
+        ]
+        self.last_preview_update = now
+        
+        # Store for next iteration
         self.last_rotation = raw_rotation.copy()
         self.last_translation = translation.copy()
+        
         self.camera_error = ""
         pose["ready_to_send"] = True
+        
         return pose
 
 
@@ -670,14 +856,7 @@ class ControlServer:
         self.control = ControlState()
         self.serial_bridge = SerialBridge()
         self.mocap = MotionCaptureEngine()
-        self.telemetry = {
-            "position": {"x": 0.0, "y": 0.0, "z": 0.0},
-            "rotation": {"yaw": 0.0, "pitch": 0.0, "roll": 0.0},
-            "error": 0.0,
-            "detected_leds_per_camera": [0, 0, 0],
-            "ready_to_send": False,
-            "using_default_data": True,
-        }
+        self.telemetry = dict(DEFAULT_TELEMETRY)
         self.last_serial_payload = None
         self.state_lock = asyncio.Lock()
 
@@ -776,10 +955,14 @@ class ControlServer:
 
     async def tracking_loop(self):
         interval = 1 / TRACKING_HZ
+        
         while True:
+            loop_start = time.time()
+            
             async with self.state_lock:
                 self.serial_bridge.refresh_ports()
                 pose = self.mocap.read_pose()
+                
                 if pose is not None:
                     pose["using_default_data"] = not pose.get("ready_to_send", False)
                     self.telemetry = pose
@@ -787,6 +970,7 @@ class ControlServer:
                     self.telemetry = dict(DEFAULT_TELEMETRY)
 
                 snapshot = self.build_snapshot()
+                
                 if snapshot["system"]["canSendToEsp32"]:
                     serial_payload = {
                         "timestamp": time.time(),
@@ -800,7 +984,10 @@ class ControlServer:
                         self.last_serial_payload = serial_payload
 
             await self.broadcast_state()
-            await asyncio.sleep(interval)
+            
+            elapsed = time.time() - loop_start
+            sleep_time = max(0, interval - elapsed)
+            await asyncio.sleep(sleep_time)
 
     async def close(self):
         self.serial_bridge.disconnect()
