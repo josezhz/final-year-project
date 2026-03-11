@@ -39,271 +39,264 @@ const EMPTY_SYSTEM = {
   lastSerialPayload: null,
 };
 
+const TRAJECTORY_WINDOW_MS = 3000;
+
 function formatNumber(value, digits = 3) {
   return Number(value ?? 0).toFixed(digits);
 }
 
-function rotatePoint(point, orbit) {
-  const cosYaw = Math.cos(orbit.yaw);
-  const sinYaw = Math.sin(orbit.yaw);
-  const cosPitch = Math.cos(orbit.pitch);
-  const sinPitch = Math.sin(orbit.pitch);
+function buildLinePath(points, getX, getY) {
+  if (!points.length) {
+    return '';
+  }
 
-  const x1 = point.x * cosYaw - point.z * sinYaw;
-  const z1 = point.x * sinYaw + point.z * cosYaw;
-  const y1 = point.y;
-
-  return {
-    x: x1,
-    y: y1 * cosPitch - z1 * sinPitch,
-    z: y1 * sinPitch + z1 * cosPitch,
-  };
+  return points
+    .map((point, index) => `${index === 0 ? 'M' : 'L'} ${getX(point).toFixed(2)} ${getY(point).toFixed(2)}`)
+    .join(' ');
 }
 
-function Scene3D({ system, telemetry }) {
-  const canvasRef = useRef(null);
-  const dragStateRef = useRef(null);
-  const [orbit, setOrbit] = useState({ yaw: -0.8, pitch: 0.55, distance: 3.2 });
-
-  useEffect(() => {
-    const canvas = canvasRef.current;
-    if (!canvas) {
-      return undefined;
-    }
-
-    const context = canvas.getContext('2d');
-    if (!context) {
-      return undefined;
-    }
-
-    const resize = () => {
-      const bounds = canvas.getBoundingClientRect();
-      const dpr = window.devicePixelRatio || 1;
-      canvas.width = Math.max(1, Math.round(bounds.width * dpr));
-      canvas.height = Math.max(1, Math.round(bounds.height * dpr));
-      context.setTransform(dpr, 0, 0, dpr, 0, 0);
-    };
-
-    resize();
-    window.addEventListener('resize', resize);
-
-    const render = () => {
-      const width = canvas.clientWidth;
-      const height = canvas.clientHeight;
-      const centerX = width / 2;
-      const centerY = height / 2;
-      const focal = Math.min(width, height) * 0.9;
-
-      context.clearRect(0, 0, width, height);
-
-      const project = (point) => {
-        const rotated = rotatePoint(point, orbit);
-        const depth = rotated.z + orbit.distance;
-        const safeDepth = Math.max(depth, 0.1);
-        return {
-          x: centerX + (rotated.x * focal) / safeDepth,
-          y: centerY - (rotated.y * focal) / safeDepth,
-          depth: safeDepth,
-        };
-      };
-
-      const lines = [];
-      const sprites = [];
-      const pushLine = (from, to, color, widthPx, dashed = false) => {
-        const projectedFrom = project(from);
-        const projectedTo = project(to);
-        lines.push({
-          from: projectedFrom,
-          to: projectedTo,
-          color,
-          width: widthPx,
-          dashed,
-          depth: (projectedFrom.depth + projectedTo.depth) / 2,
-        });
-      };
-
-      const axisLength = 0.22;
-      pushLine({ x: 0, y: 0, z: 0 }, { x: axisLength, y: 0, z: 0 }, '#ff9f1c', 2, true);
-      pushLine({ x: 0, y: 0, z: 0 }, { x: 0, y: axisLength, z: 0 }, '#43aa8b', 2, true);
-      pushLine({ x: 0, y: 0, z: 0 }, { x: 0, y: 0, z: axisLength }, '#7bdff2', 2, true);
-
-      const gridExtent = 1.2;
-      for (let index = -4; index <= 4; index += 1) {
-        const coord = (index / 4) * gridExtent;
-        pushLine({ x: -gridExtent, y: 0, z: coord }, { x: gridExtent, y: 0, z: coord }, 'rgba(255,255,255,0.08)', 1);
-        pushLine({ x: coord, y: 0, z: -gridExtent }, { x: coord, y: 0, z: gridExtent }, 'rgba(255,255,255,0.08)', 1);
-      }
-
-      system.cameraPoses.forEach((cameraPose) => {
-        const position = {
-          x: cameraPose.position.x,
-          y: cameraPose.position.z,
-          z: cameraPose.position.y,
-        };
-        const xAxisEnd = {
-          x: position.x + cameraPose.axes.x[0] * 0.12,
-          y: position.y + cameraPose.axes.x[2] * 0.12,
-          z: position.z + cameraPose.axes.x[1] * 0.12,
-        };
-        const yAxisEnd = {
-          x: position.x + cameraPose.axes.y[0] * 0.12,
-          y: position.y + cameraPose.axes.y[2] * 0.12,
-          z: position.z + cameraPose.axes.y[1] * 0.12,
-        };
-        const zAxisEnd = {
-          x: position.x + cameraPose.axes.z[0] * 0.12,
-          y: position.y + cameraPose.axes.z[2] * 0.12,
-          z: position.z + cameraPose.axes.z[1] * 0.12,
-        };
-
-        pushLine(position, xAxisEnd, '#ff9f1c', 2);
-        pushLine(position, yAxisEnd, '#43aa8b', 2);
-        pushLine(position, zAxisEnd, '#7bdff2', 2);
-
-        const projected = project(position);
-        sprites.push({
-          kind: 'camera',
-          x: projected.x,
-          y: projected.y,
-          depth: projected.depth,
-          label: cameraPose.camera.toUpperCase(),
-        });
-      });
-
-      const dronePosition = {
-        x: telemetry.position.x,
-        y: telemetry.position.z,
-        z: telemetry.position.y,
-      };
-      const projectedDrone = project(dronePosition);
-      sprites.push({
-        kind: 'drone',
-        x: projectedDrone.x,
-        y: projectedDrone.y,
-        depth: projectedDrone.depth,
-        label: 'DRONE',
-      });
-
-      lines.sort((a, b) => b.depth - a.depth).forEach((line) => {
-        context.beginPath();
-        context.setLineDash(line.dashed ? [6, 6] : []);
-        context.strokeStyle = line.color;
-        context.lineWidth = line.width;
-        context.moveTo(line.from.x, line.from.y);
-        context.lineTo(line.to.x, line.to.y);
-        context.stroke();
-      });
-      context.setLineDash([]);
-
-      sprites.sort((a, b) => b.depth - a.depth).forEach((sprite) => {
-        if (sprite.kind === 'camera') {
-          const size = Math.max(10, 22 / sprite.depth);
-          context.fillStyle = 'rgba(239, 247, 246, 0.92)';
-          context.strokeStyle = 'rgba(9, 17, 31, 0.65)';
-          context.lineWidth = 1.5;
-          context.beginPath();
-          context.roundRect(sprite.x - size / 2, sprite.y - size / 2, size, size, 4);
-          context.fill();
-          context.stroke();
-        } else {
-          const radius = Math.max(5, 13 / sprite.depth);
-          const gradient = context.createRadialGradient(sprite.x, sprite.y, 0, sprite.x, sprite.y, radius * 3);
-          gradient.addColorStop(0, 'rgba(255, 244, 212, 0.95)');
-          gradient.addColorStop(1, 'rgba(255, 159, 28, 0.12)');
-          context.fillStyle = gradient;
-          context.beginPath();
-          context.arc(sprite.x, sprite.y, radius * 3, 0, Math.PI * 2);
-          context.fill();
-
-          context.fillStyle = '#ff9f1c';
-          context.strokeStyle = '#fff4d4';
-          context.lineWidth = 2;
-          context.beginPath();
-          context.arc(sprite.x, sprite.y, radius, 0, Math.PI * 2);
-          context.fill();
-          context.stroke();
-        }
-
-        context.fillStyle = sprite.kind === 'drone' ? '#ffd699' : '#eff7f6';
-        context.font = '700 12px sans-serif';
-        context.fillText(sprite.label, sprite.x + 12, sprite.y - 10);
-      });
-    };
-
-    render();
-    return () => window.removeEventListener('resize', resize);
-  }, [orbit, system.cameraPoses, telemetry.position]);
-
-  const onPointerDown = (event) => {
-    dragStateRef.current = {
-      x: event.clientX,
-      y: event.clientY,
-      yaw: orbit.yaw,
-      pitch: orbit.pitch,
-    };
-    event.currentTarget.setPointerCapture(event.pointerId);
+function XYTrajectoryChart({ samples, telemetry }) {
+  const width = 520;
+  const height = 320;
+  const padding = 34;
+  const innerWidth = width - padding * 2;
+  const innerHeight = height - padding * 2;
+  const yawRadians = (Number(telemetry.rotation?.yaw ?? 0) * Math.PI) / 180;
+  const domain = {
+    xMin: -0.5,
+    xMax: 0.5,
+    yMin: -0.5,
+    yMax: 0.5,
   };
 
-  const onPointerMove = (event) => {
-    if (!dragStateRef.current) {
-      return;
-    }
-
-    const deltaX = event.clientX - dragStateRef.current.x;
-    const deltaY = event.clientY - dragStateRef.current.y;
-    setOrbit((current) => ({
-      ...current,
-      yaw: dragStateRef.current.yaw + deltaX * 0.01,
-      pitch: Math.max(-1.2, Math.min(1.2, dragStateRef.current.pitch + deltaY * 0.01)),
-    }));
-  };
-
-  const endDrag = (event) => {
-    if (dragStateRef.current) {
-      dragStateRef.current = null;
-      if (event.currentTarget.hasPointerCapture(event.pointerId)) {
-        event.currentTarget.releasePointerCapture(event.pointerId);
-      }
-    }
-  };
-
-  const onWheel = (event) => {
-    event.preventDefault();
-    setOrbit((current) => ({
-      ...current,
-      distance: Math.max(1.4, Math.min(8, current.distance + event.deltaY * 0.003)),
-    }));
-  };
+  const scaleX = (value) => padding + ((value - domain.xMin) / (domain.xMax - domain.xMin || 1)) * innerWidth;
+  const scaleY = (value) => height - padding - ((value - domain.yMin) / (domain.yMax - domain.yMin || 1)) * innerHeight;
+  const path = buildLinePath(samples, (sample) => scaleX(sample.x), (sample) => scaleY(sample.y));
+  const latest = samples.at(-1);
+  const latestX = latest ? scaleX(latest.x) : scaleX(telemetry.position.x);
+  const latestY = latest ? scaleY(latest.y) : scaleY(telemetry.position.y);
+  const planeLength = innerWidth * 0.055;
+  const planeWidth = planeLength * 0.72;
+  const planeTailInset = planeLength * 0.34;
+  const planePoints = [
+    { x: planeLength / 2, y: 0 },
+    { x: -planeLength / 2, y: -planeWidth / 2 },
+    { x: -planeLength / 2 + planeTailInset, y: 0 },
+    { x: -planeLength / 2, y: planeWidth / 2 },
+  ];
+  const planePolygon = planePoints
+    .map((point) => {
+      const rotatedX = point.x * Math.cos(yawRadians) - point.y * Math.sin(yawRadians);
+      const rotatedY = point.x * Math.sin(yawRadians) + point.y * Math.cos(yawRadians);
+      return `${(latestX + rotatedX).toFixed(2)},${(latestY - rotatedY).toFixed(2)}`;
+    })
+    .join(' ');
 
   return (
-    <div className="scene-layout">
-      <canvas
-        ref={canvasRef}
-        className="scene-canvas"
-        onPointerDown={onPointerDown}
-        onPointerMove={onPointerMove}
-        onPointerUp={endDrag}
-        onPointerLeave={endDrag}
-        onWheel={onWheel}
-      />
+    <div className="chart-card">
+      <div className="chart-heading">
+        <div>
+          <span className="meta-label">Plan View</span>
+          <strong>X/Y trajectory</strong>
+        </div>
+        <span className="chart-window">Last 3.0 s</span>
+      </div>
 
-      <div className="scene-readout">
+      <svg viewBox={`0 0 ${width} ${height}`} className="chart-svg" role="img" aria-label="XY trajectory plot">
+        <rect x="0" y="0" width={width} height={height} rx="20" className="chart-backdrop" />
+        <line x1={padding} y1={scaleY(0)} x2={width - padding} y2={scaleY(0)} className="chart-axis chart-axis-origin" />
+        <line x1={scaleX(0)} y1={padding} x2={scaleX(0)} y2={height - padding} className="chart-axis chart-axis-origin" />
+
+        {[0.25, 0.5, 0.75].map((fraction) => (
+          <g key={fraction}>
+            <line
+              x1={padding}
+              y1={padding + innerHeight * fraction}
+              x2={width - padding}
+              y2={padding + innerHeight * fraction}
+              className="chart-grid"
+            />
+            <line
+              x1={padding + innerWidth * fraction}
+              y1={padding}
+              x2={padding + innerWidth * fraction}
+              y2={height - padding}
+              className="chart-grid"
+            />
+          </g>
+        ))}
+
+        {path ? <path d={path} className="chart-line chart-line-xy" /> : null}
+        {samples.map((sample, index) => (
+          <circle
+            key={sample.t}
+            cx={scaleX(sample.x)}
+            cy={scaleY(sample.y)}
+            r={index === samples.length - 1 ? 4.5 : 2.25}
+            className={index === samples.length - 1 ? 'chart-point chart-point-live' : 'chart-point'}
+          />
+        ))}
+
+        {latest ? (
+          <>
+            <line
+              x1={scaleX(0)}
+              y1={scaleY(latest.y)}
+              x2={scaleX(latest.x)}
+              y2={scaleY(latest.y)}
+              className="chart-guide"
+            />
+            <line
+              x1={scaleX(latest.x)}
+              y1={scaleY(0)}
+              x2={scaleX(latest.x)}
+              y2={scaleY(latest.y)}
+              className="chart-guide"
+            />
+          </>
+        ) : null}
+
+        <polygon points={planePolygon} className="chart-yaw-plane" />
+
+        <circle cx={scaleX(0)} cy={scaleY(0)} r="4" className="chart-origin" />
+
+        <text x={width - padding} y={height - 8} textAnchor="end" className="chart-label">
+          X ({formatNumber(domain.xMin, 2)} to {formatNumber(domain.xMax, 2)})
+        </text>
+        <text x="16" y={padding - 10} className="chart-label">
+          Y ({formatNumber(domain.yMin, 2)} to {formatNumber(domain.yMax, 2)})
+        </text>
+      </svg>
+
+      <div className="chart-readout">
         <div>
-          <span className="meta-label">Origin</span>
-          <strong>Extrinsic calibration marker frame</strong>
+          <span className="meta-label">Latest X</span>
+          <strong>{formatNumber(telemetry.position.x)}</strong>
         </div>
         <div>
-          <span className="meta-label">Drone position</span>
-          <strong>
-            {formatNumber(telemetry.position.x)}, {formatNumber(telemetry.position.y)},{' '}
-            {formatNumber(telemetry.position.z)}
-          </strong>
+          <span className="meta-label">Latest Y</span>
+          <strong>{formatNumber(telemetry.position.y)}</strong>
         </div>
         <div>
-          <span className="meta-label">Cameras</span>
-          <strong>{system.cameraPoses.length} loaded</strong>
+          <span className="meta-label">Yaw</span>
+          <strong>{formatNumber(telemetry.rotation.yaw, 2)} deg</strong>
         </div>
       </div>
+    </div>
+  );
+}
+
+function ZTimelineChart({ samples, telemetry }) {
+  const width = 520;
+  const height = 320;
+  const padding = 34;
+  const innerWidth = width - padding * 2;
+  const innerHeight = height - padding * 2;
+  const domainMin = 0;
+  const domainMax = 1;
+  const latest = samples.at(-1);
+
+  const scaleX = (timestamp) => {
+    if (!samples.length) {
+      return padding;
+    }
+    const first = samples[0].t;
+    return padding + ((timestamp - first) / TRAJECTORY_WINDOW_MS) * innerWidth;
+  };
+  const scaleY = (value) => height - padding - ((value - domainMin) / (domainMax - domainMin || 1)) * innerHeight;
+  const path = buildLinePath(samples, (sample) => scaleX(sample.t), (sample) => scaleY(sample.z));
+
+  return (
+    <div className="chart-card">
+      <div className="chart-heading">
+        <div>
+          <span className="meta-label">Altitude</span>
+          <strong>Z over time</strong>
+        </div>
+        <span className="chart-window">Last 3.0 s</span>
+      </div>
+
+      <svg viewBox={`0 0 ${width} ${height}`} className="chart-svg" role="img" aria-label="Z versus time plot">
+        <rect x="0" y="0" width={width} height={height} rx="20" className="chart-backdrop" />
+        <line x1={padding} y1={scaleY(0)} x2={width - padding} y2={scaleY(0)} className="chart-axis chart-axis-origin" />
+        <line x1={padding} y1={padding} x2={padding} y2={height - padding} className="chart-axis" />
+
+        {[0.25, 0.5, 0.75].map((fraction) => (
+          <g key={fraction}>
+            <line
+              x1={padding}
+              y1={padding + innerHeight * fraction}
+              x2={width - padding}
+              y2={padding + innerHeight * fraction}
+              className="chart-grid"
+            />
+            <line
+              x1={padding + innerWidth * fraction}
+              y1={padding}
+              x2={padding + innerWidth * fraction}
+              y2={height - padding}
+              className="chart-grid"
+            />
+          </g>
+        ))}
+
+        {path ? <path d={path} className="chart-line chart-line-z" /> : null}
+        {samples.map((sample, index) => (
+          <circle
+            key={sample.t}
+            cx={scaleX(sample.t)}
+            cy={scaleY(sample.z)}
+            r={index === samples.length - 1 ? 4.5 : 2.25}
+            className={index === samples.length - 1 ? 'chart-point chart-point-live' : 'chart-point'}
+          />
+        ))}
+
+        {latest ? (
+          <>
+            <line
+              x1={scaleX(latest.t)}
+              y1={scaleY(0)}
+              x2={scaleX(latest.t)}
+              y2={scaleY(latest.z)}
+              className="chart-guide"
+            />
+            <line
+              x1={padding}
+              y1={scaleY(latest.z)}
+              x2={scaleX(latest.t)}
+              y2={scaleY(latest.z)}
+              className="chart-guide"
+            />
+          </>
+        ) : null}
+
+        <text x={width - padding} y={height - 8} textAnchor="end" className="chart-label">
+          Time (-3.0 s to now)
+        </text>
+        <text x="16" y={padding - 10} className="chart-label">
+          Z ({formatNumber(domainMin, 2)} to {formatNumber(domainMax, 2)})
+        </text>
+      </svg>
+
+      <div className="chart-readout">
+        <div>
+          <span className="meta-label">Latest Z</span>
+          <strong>{formatNumber(telemetry.position.z)}</strong>
+        </div>
+        <div>
+          <span className="meta-label">Samples</span>
+          <strong>{samples.length}</strong>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function TrajectoryPanel({ telemetry, samples }) {
+  return (
+    <div className="trajectory-layout">
+      <XYTrajectoryChart samples={samples} telemetry={telemetry} />
+      <ZTimelineChart samples={samples} telemetry={telemetry} />
     </div>
   );
 }
@@ -316,6 +309,18 @@ function App() {
   const [localControl, setLocalControl] = useState(EMPTY_CONTROL);
   const [telemetry, setTelemetry] = useState(EMPTY_TELEMETRY);
   const [system, setSystem] = useState(EMPTY_SYSTEM);
+  const [trajectorySamples, setTrajectorySamples] = useState([]);
+
+  useEffect(() => {
+    const intervalId = window.setInterval(() => {
+      const now = Date.now();
+      setTrajectorySamples((current) =>
+        current.filter((sample) => now - sample.t <= TRAJECTORY_WINDOW_MS),
+      );
+    }, 100);
+
+    return () => window.clearInterval(intervalId);
+  }, []);
 
   useEffect(() => {
     const socket = new WebSocket('ws://localhost:8765');
@@ -334,6 +339,20 @@ function App() {
       setTelemetry(payload.telemetry);
       setSystem(payload.system);
       setServerControl(payload.control);
+      setTrajectorySamples((current) => {
+        const now = Date.now();
+        const next = [
+          ...current,
+          {
+            t: now,
+            x: Number(payload.telemetry.position?.x ?? 0),
+            y: Number(payload.telemetry.position?.y ?? 0),
+            z: Number(payload.telemetry.position?.z ?? 0),
+          },
+        ].filter((sample) => now - sample.t <= TRAJECTORY_WINDOW_MS);
+
+        return next;
+      });
 
       if (!hasInitialisedControl.current) {
         setLocalControl(payload.control);
@@ -571,11 +590,11 @@ function App() {
           <article className="panel panel-scene">
             <div className="panel-heading">
               <div>
-                <p className="panel-label">Scene</p>
-                <h2>Interactive 3D camera and drone view</h2>
+                <p className="panel-label">Trajectory</p>
+                <h2>Realtime motion diagrams</h2>
               </div>
             </div>
-            <Scene3D system={system} telemetry={telemetry} />
+            <TrajectoryPanel telemetry={telemetry} samples={trajectorySamples} />
           </article>
 
           <article className="panel panel-pid">

@@ -1,9 +1,12 @@
 # ... (keeping all imports and other code the same)
 import asyncio
 import base64
+import faulthandler
 import json
 import math
+import sys
 import time
+import traceback
 from dataclasses import dataclass, field
 from http import HTTPStatus
 from pathlib import Path
@@ -23,6 +26,9 @@ except ImportError:
     list_ports = None
 
 
+faulthandler.enable(all_threads=True)
+
+
 BASE_DIR = Path(__file__).resolve().parent
 INTRINSICS_PATH = BASE_DIR / "calibration" / "camera_intrinsics.json"
 EXTRINSICS_PATH = BASE_DIR / "calibration" / "camera_extrinsics.json"
@@ -33,7 +39,7 @@ EXPECTED_CAMERAS = 3
 MIN_BRIGHTNESS = 50
 MAX_LEDS = 3
 MAX_FIT_ERROR = 0.05
-TRACKING_HZ = 60
+TRACKING_HZ = 30
 SERIAL_REFRESH_SECONDS = 1.0
 DEFAULT_BAUD_RATE = 115200
 ALLOW_DEFAULT_TELEMETRY_SEND = True
@@ -911,28 +917,33 @@ class ControlServer:
         self.clients -= disconnected
 
     async def handle_message(self, message):
-        payload = json.loads(message)
-        message_type = payload.get("type")
+        try:
+            payload = json.loads(message)
+            message_type = payload.get("type")
 
-        async with self.state_lock:
-            if message_type == "set_control":
-                control_payload = payload.get("control", {})
-                self.control.active = bool(control_payload.get("active", self.control.active))
-                self.control.serial_port = str(
-                    control_payload.get("serialPort", self.control.serial_port)
-                ).strip()
-                self.control.baud_rate = int(
-                    control_payload.get("baudRate", self.control.baud_rate)
-                )
-                if "pid" in control_payload:
-                    self.control.pid = control_payload["pid"]
+            async with self.state_lock:
+                if message_type == "set_control":
+                    control_payload = payload.get("control", {})
+                    self.control.active = bool(control_payload.get("active", self.control.active))
+                    self.control.serial_port = str(
+                        control_payload.get("serialPort", self.control.serial_port)
+                    ).strip()
+                    self.control.baud_rate = int(
+                        control_payload.get("baudRate", self.control.baud_rate)
+                    )
+                    if "pid" in control_payload:
+                        self.control.pid = control_payload["pid"]
 
-                if self.control.serial_port:
-                    self.serial_bridge.connect(self.control.serial_port, self.control.baud_rate)
-                else:
-                    self.serial_bridge.disconnect()
-            elif message_type == "refresh_serial_ports":
-                self.serial_bridge.refresh_ports(force=True)
+                    if self.control.serial_port:
+                        self.serial_bridge.connect(self.control.serial_port, self.control.baud_rate)
+                    else:
+                        self.serial_bridge.disconnect()
+                elif message_type == "refresh_serial_ports":
+                    self.serial_bridge.refresh_ports(force=True)
+        except Exception as exc:
+            self.serial_bridge.last_error = f"Control message handling failed: {exc}"
+            print(f"Control message handling failed: {exc}")
+            traceback.print_exc()
 
     async def register(self, websocket):
         self.clients.add(websocket)
@@ -950,6 +961,9 @@ class ControlServer:
                 await self.broadcast_state()
         except websockets.exceptions.ConnectionClosed:
             pass
+        except Exception as exc:
+            print(f"WebSocket handler failed: {exc}")
+            traceback.print_exc()
         finally:
             await self.unregister(websocket)
 
@@ -958,30 +972,36 @@ class ControlServer:
         
         while True:
             loop_start = time.time()
-            
-            async with self.state_lock:
-                self.serial_bridge.refresh_ports()
-                pose = self.mocap.read_pose()
-                
-                if pose is not None:
-                    pose["using_default_data"] = not pose.get("ready_to_send", False)
-                    self.telemetry = pose
-                else:
-                    self.telemetry = dict(DEFAULT_TELEMETRY)
 
-                snapshot = self.build_snapshot()
-                
-                if snapshot["system"]["canSendToEsp32"]:
-                    serial_payload = {
-                        "timestamp": time.time(),
-                        "active": self.control.active,
-                        "position": self.telemetry["position"],
-                        "rotation": self.telemetry["rotation"],
-                        "using_default_data": self.telemetry["using_default_data"],
-                        "pid": self.control.pid,
-                    }
-                    if self.serial_bridge.send(serial_payload):
-                        self.last_serial_payload = serial_payload
+            try:
+                async with self.state_lock:
+                    self.serial_bridge.refresh_ports()
+                    pose = self.mocap.read_pose()
+                    
+                    if pose is not None:
+                        pose["using_default_data"] = not pose.get("ready_to_send", False)
+                        self.telemetry = pose
+                    else:
+                        self.telemetry = dict(DEFAULT_TELEMETRY)
+
+                    snapshot = self.build_snapshot()
+                    
+                    if snapshot["system"]["canSendToEsp32"]:
+                        serial_payload = {
+                            "timestamp": time.time(),
+                            "active": self.control.active,
+                            "position": self.telemetry["position"],
+                            "rotation": self.telemetry["rotation"],
+                            "using_default_data": self.telemetry["using_default_data"],
+                            "pid": self.control.pid,
+                        }
+                        if self.serial_bridge.send(serial_payload):
+                            self.last_serial_payload = serial_payload
+            except Exception as exc:
+                self.telemetry = dict(DEFAULT_TELEMETRY)
+                self.mocap.camera_error = f"Tracking loop failed: {exc}"
+                print(f"Tracking loop failed: {exc}")
+                traceback.print_exc()
 
             await self.broadcast_state()
             
@@ -997,6 +1017,18 @@ class ControlServer:
 async def main():
     server = ControlServer()
     tracking_task = asyncio.create_task(server.tracking_loop())
+    tracking_task.set_name("tracking_loop")
+
+    def report_task_result(task):
+        try:
+            task.result()
+        except asyncio.CancelledError:
+            pass
+        except Exception as exc:
+            print(f"Background task '{task.get_name()}' failed: {exc}", file=sys.stderr)
+            traceback.print_exc()
+
+    tracking_task.add_done_callback(report_task_result)
 
     try:
         async with websockets.serve(
@@ -1009,11 +1041,19 @@ async def main():
             await asyncio.Future()
     finally:
         tracking_task.cancel()
+        try:
+            await tracking_task
+        except asyncio.CancelledError:
+            pass
         await server.close()
 
 
 if __name__ == "__main__":
     try:
+        print("Python faulthandler enabled.", flush=True)
         asyncio.run(main())
     except KeyboardInterrupt:
         print("Server stopped.")
+    except Exception as exc:
+        print(f"Fatal server error: {exc}", file=sys.stderr)
+        traceback.print_exc()

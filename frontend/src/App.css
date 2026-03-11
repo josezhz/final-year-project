@@ -194,6 +194,15 @@ input {
   padding: 0.8rem 0.9rem;
 }
 
+select {
+  color-scheme: dark;
+}
+
+select option {
+  color: #eff7f6;
+  background: #101d2f;
+}
+
 button {
   border: 0;
   border-radius: 999px;
@@ -340,30 +349,117 @@ button:hover {
   font-size: 0.9rem;
 }
 
-.scene-layout {
-  display: grid;
-  gap: 1rem;
-}
-
-.scene-canvas {
-  width: 100%;
-  min-height: 24rem;
-  height: 24rem;
-  border-radius: 20px;
-  background:
-    radial-gradient(circle at 50% 20%, rgba(255, 159, 28, 0.12), transparent 30%),
-    linear-gradient(180deg, rgba(255, 255, 255, 0.03), rgba(255, 255, 255, 0.01));
-  border: 1px solid rgba(255, 255, 255, 0.08);
-  cursor: grab;
-}
-
-.scene-readout {
+.trajectory-layout,
+.chart-readout {
   display: grid;
   gap: 0.9rem;
-  grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
 }
 
-.scene-readout div {
+.trajectory-layout {
+  grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+}
+
+.chart-card {
+  display: grid;
+  gap: 0.85rem;
+}
+
+.chart-heading {
+  display: flex;
+  justify-content: space-between;
+  gap: 1rem;
+  align-items: baseline;
+}
+
+.chart-window {
+  color: #ffd699;
+  font-size: 0.88rem;
+  letter-spacing: 0.04em;
+}
+
+.chart-svg {
+  width: 100%;
+  min-height: 20rem;
+  height: 20rem;
+  display: block;
+}
+
+.chart-backdrop {
+  fill: rgba(255, 255, 255, 0.03);
+  stroke: rgba(255, 255, 255, 0.08);
+}
+
+.chart-axis {
+  stroke: rgba(239, 247, 246, 0.42);
+  stroke-width: 1.4;
+}
+
+.chart-axis-origin {
+  stroke: rgba(239, 247, 246, 0.68);
+  stroke-width: 1.8;
+}
+
+.chart-grid {
+  stroke: rgba(255, 255, 255, 0.08);
+  stroke-width: 1;
+  stroke-dasharray: 4 8;
+}
+
+.chart-line {
+  fill: none;
+  stroke-width: 3.5;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.chart-line-xy {
+  stroke: #ffbf69;
+}
+
+.chart-line-z {
+  stroke: #7bdff2;
+}
+
+.chart-point {
+  fill: rgba(239, 247, 246, 0.55);
+}
+
+.chart-point-live {
+  fill: #eff7f6;
+  stroke: rgba(255, 159, 28, 0.75);
+  stroke-width: 2;
+}
+
+.chart-origin {
+  fill: #43aa8b;
+  stroke: rgba(239, 247, 246, 0.45);
+  stroke-width: 1.5;
+}
+
+.chart-yaw-plane {
+  fill: #ff6b6b;
+  stroke: rgba(255, 245, 245, 0.7);
+  stroke-width: 1.4;
+  stroke-linejoin: round;
+}
+
+.chart-guide {
+  stroke: rgba(255, 255, 255, 0.18);
+  stroke-width: 1;
+  stroke-dasharray: 5 6;
+}
+
+.chart-label {
+  fill: #9fc8c0;
+  font-size: 12px;
+  letter-spacing: 0.04em;
+}
+
+.chart-readout {
+  grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+}
+
+.chart-readout div {
   display: grid;
   gap: 0.35rem;
   padding: 0.9rem 1rem;
