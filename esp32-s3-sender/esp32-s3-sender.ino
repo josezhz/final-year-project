@@ -15,12 +15,7 @@ String incomingLine;
 
 void onDataSent(const wifi_tx_info_t *txInfo, esp_now_send_status_t status) {
   (void)txInfo;
-  Serial.print("ESP-NOW send status: ");
-  if (status == ESP_NOW_SEND_SUCCESS) {
-    Serial.println("success");
-  } else {
-    Serial.println("failure");
-  }
+  (void)status;
 }
 
 bool initEspNowPeer() {
@@ -64,18 +59,13 @@ void sendLineOverEspNow(const String &line) {
   EspNowMessage message = {};
   const size_t copyLength = min(line.length(), MAX_PAYLOAD_LENGTH - 1);
   line.substring(0, copyLength).toCharArray(message.payload, MAX_PAYLOAD_LENGTH);
-  Serial.print("Forwarding payload over ESP-NOW: ");
-  Serial.println(message.payload);
 
   const esp_err_t result = esp_now_send(
     DRONE_MAC_ADDRESS,
     reinterpret_cast<const uint8_t *>(&message),
     sizeof(message)
   );
-  if (result != ESP_OK) {
-    Serial.print("esp_now_send failed with code ");
-    Serial.println(result);
-  }
+  (void)result;
 }
 
 void setup() {
@@ -110,8 +100,6 @@ void loop() {
     if (nextChar == '\n') {
       incomingLine.trim();
       if (incomingLine.length() > 0) {
-        Serial.print("Received from Python server: ");
-        Serial.println(incomingLine);
         sendLineOverEspNow(incomingLine);
       }
       incomingLine = "";

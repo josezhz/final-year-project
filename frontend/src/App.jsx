@@ -7,7 +7,7 @@ const EMPTY_TELEMETRY = {
   error: 0,
   solved_led_coordinates: [],
   detected_leds_per_camera: [0, 0, 0],
-  ready_to_send: false,
+  spatial_data_valid: false,
 };
 
 const EMPTY_CONTROL = {
@@ -422,6 +422,8 @@ function App() {
             <p className="hero-copy">
               The server only transmits when all three cameras are communicating, the
               frontend has activated the pipeline, and the ESP32-S3 serial link is open.
+              If tracking is invalid, the payload is still sent but marked as having no
+              valid spatial data.
             </p>
           </div>
 
@@ -489,8 +491,8 @@ function App() {
             </div>
 
             <p className="hint">
-              Activation is controlled from the frontend only. The backend will still block
-              serial transmission until all three cameras are ready and the serial link is open.
+              Activation is controlled from the frontend only. Once active, the backend
+              streams continuously while the serial link is open, including explicit invalid-data frames.
             </p>
           </article>
 
@@ -649,7 +651,7 @@ function App() {
               </div>
               <div>
                 <span>Camera state</span>
-                <strong>{system.camerasReady ? 'Ready to transmit' : system.cameraError || 'Blocked'}</strong>
+                <strong>{system.camerasReady ? 'Valid spatial data' : system.cameraError || 'Tracking invalid'}</strong>
               </div>
               <div>
                 <span>Serial state</span>

@@ -41,8 +41,9 @@ MAX_LEDS = 3
 MAX_FIT_ERROR = 0.05
 TRACKING_HZ = 30
 SERIAL_REFRESH_SECONDS = 1.0
+SERIAL_RECONNECT_SECONDS = 1.0
+SERIAL_SETTLE_SECONDS = 2.0
 DEFAULT_BAUD_RATE = 115200
-ALLOW_DEFAULT_TELEMETRY_SEND = True
 POSITION_JUMP_WEIGHT = 2.0
 PREVIEW_HZ = 5
 
@@ -62,8 +63,7 @@ DEFAULT_TELEMETRY = {
     "error": 0.0,
     "solved_led_coordinates": [],
     "detected_leds_per_camera": [0, 0, 0],
-    "ready_to_send": False,
-    "using_default_data": True,
+    "spatial_data_valid": False,
 }
 PREVIEW_WIDTH = 240
 PREVIEW_JPEG_QUALITY = 45
@@ -497,6 +497,8 @@ class SerialBridge:
         self.last_error = ""
         self.available_ports = []
         self._last_refresh = 0.0
+        self._last_connect_attempt = 0.0
+        self._connected_at = 0.0
 
     def refresh_ports(self, force=False):
         now = time.time()
@@ -514,6 +516,7 @@ class SerialBridge:
         ]
 
     def connect(self, port, baud_rate):
+        self._last_connect_attempt = time.time()
         self.refresh_ports(force=True)
         self.disconnect()
 
@@ -527,16 +530,40 @@ class SerialBridge:
             return False
 
         try:
-            self.connection = serial.Serial(port=port, baudrate=int(baud_rate), timeout=0.1)
+            connection = serial.Serial(
+                port=port,
+                baudrate=int(baud_rate),
+                timeout=0.1,
+                write_timeout=1.0,
+                rtscts=False,
+                dsrdtr=False,
+            )
+            connection.reset_input_buffer()
+            connection.reset_output_buffer()
+            self.connection = connection
             self.port = port
             self.baud_rate = int(baud_rate)
+            self._connected_at = time.time()
             self.last_error = ""
             return True
         except Exception as exc:
             self.connection = None
             self.port = ""
+            self._connected_at = 0.0
             self.last_error = f"Serial connection failed: {exc}"
             return False
+
+    def ensure_connected(self, port, baud_rate):
+        if not port:
+            return False
+        if self.is_connected() and self.port == port and self.baud_rate == int(baud_rate):
+            return True
+
+        now = time.time()
+        if (now - self._last_connect_attempt) < SERIAL_RECONNECT_SECONDS:
+            return False
+
+        return self.connect(port, baud_rate)
 
     def disconnect(self):
         if self.connection:
@@ -546,16 +573,32 @@ class SerialBridge:
                 pass
         self.connection = None
         self.port = ""
+        self._connected_at = 0.0
 
     def is_connected(self):
         return bool(self.connection and self.connection.is_open)
 
+    def drain_input(self):
+        if not self.is_connected():
+            return
+
+        try:
+            waiting = getattr(self.connection, "in_waiting", 0)
+            if waiting:
+                self.connection.read(waiting)
+        except Exception:
+            pass
+
     def send(self, payload):
         if not self.is_connected():
             return False
+        if (time.time() - self._connected_at) < SERIAL_SETTLE_SECONDS:
+            self.last_error = "Serial link settling after reconnect."
+            return False
 
         try:
-            encoded = (json.dumps(payload) + "\n").encode("utf-8")
+            self.drain_input()
+            encoded = (json.dumps(payload, separators=(",", ":")) + "\n").encode("utf-8")
             self.connection.write(encoded)
             self.connection.flush()
             self.last_error = ""
@@ -779,7 +822,7 @@ class MotionCaptureEngine:
                 "error": 0.0,
                 "solved_led_coordinates": [],
                 "detected_leds_per_camera": [len(leds) for leds in all_cam_leds],
-                "ready_to_send": False,
+                "spatial_data_valid": False,
             }
 
         led_solution = solve_led_positions(
@@ -816,7 +859,7 @@ class MotionCaptureEngine:
                 ),
                 "solved_led_coordinates": solved_led_coordinates,
                 "detected_leds_per_camera": [len(leds) for leds in all_cam_leds],
-                "ready_to_send": False,
+                "spatial_data_valid": False,
             }
 
         # Extract and filter
@@ -851,7 +894,7 @@ class MotionCaptureEngine:
         self.last_translation = translation.copy()
         
         self.camera_error = ""
-        pose["ready_to_send"] = True
+        pose["spatial_data_valid"] = True
         
         return pose
 
@@ -868,7 +911,10 @@ class ControlServer:
 
     def build_snapshot(self):
         cameras_connected = len(self.mocap.camera_ids)
-        cameras_ready = cameras_connected >= EXPECTED_CAMERAS and self.telemetry["ready_to_send"]
+        cameras_ready = (
+            cameras_connected >= EXPECTED_CAMERAS
+            and self.telemetry["spatial_data_valid"]
+        )
         serial_ready = self.serial_bridge.is_connected()
         return {
             "type": "state",
@@ -893,11 +939,6 @@ class ControlServer:
                 "serialError": self.serial_bridge.last_error,
                 "availableSerialPorts": self.serial_bridge.available_ports,
                 "canSendToEsp32": self.control.active and serial_ready,
-                "sendingDefaultTelemetry": (
-                    self.control.active
-                    and serial_ready
-                    and (ALLOW_DEFAULT_TELEMETRY_SEND and not cameras_ready)
-                ),
                 "lastSerialPayload": self.last_serial_payload,
             },
         }
@@ -924,6 +965,8 @@ class ControlServer:
             async with self.state_lock:
                 if message_type == "set_control":
                     control_payload = payload.get("control", {})
+                    previous_port = self.control.serial_port
+                    previous_baud_rate = self.control.baud_rate
                     self.control.active = bool(control_payload.get("active", self.control.active))
                     self.control.serial_port = str(
                         control_payload.get("serialPort", self.control.serial_port)
@@ -934,10 +977,15 @@ class ControlServer:
                     if "pid" in control_payload:
                         self.control.pid = control_payload["pid"]
 
-                    if self.control.serial_port:
-                        self.serial_bridge.connect(self.control.serial_port, self.control.baud_rate)
-                    else:
+                    serial_settings_changed = (
+                        self.control.serial_port != previous_port
+                        or self.control.baud_rate != previous_baud_rate
+                    )
+
+                    if not self.control.serial_port:
                         self.serial_bridge.disconnect()
+                    elif serial_settings_changed or not self.serial_bridge.is_connected():
+                        self.serial_bridge.connect(self.control.serial_port, self.control.baud_rate)
                 elif message_type == "refresh_serial_ports":
                     self.serial_bridge.refresh_ports(force=True)
         except Exception as exc:
@@ -976,10 +1024,14 @@ class ControlServer:
             try:
                 async with self.state_lock:
                     self.serial_bridge.refresh_ports()
+                    if self.control.serial_port:
+                        self.serial_bridge.ensure_connected(
+                            self.control.serial_port,
+                            self.control.baud_rate,
+                        )
                     pose = self.mocap.read_pose()
                     
                     if pose is not None:
-                        pose["using_default_data"] = not pose.get("ready_to_send", False)
                         self.telemetry = pose
                     else:
                         self.telemetry = dict(DEFAULT_TELEMETRY)
@@ -987,14 +1039,25 @@ class ControlServer:
                     snapshot = self.build_snapshot()
                     
                     if snapshot["system"]["canSendToEsp32"]:
+                        spatial_data_valid = self.telemetry["spatial_data_valid"]
                         serial_payload = {
-                            "timestamp": time.time(),
-                            "active": self.control.active,
-                            "position": self.telemetry["position"],
-                            "rotation": self.telemetry["rotation"],
-                            "using_default_data": self.telemetry["using_default_data"],
-                            "pid": self.control.pid,
+                            "v": 1,
+                            "t": round(time.time(), 3),
+                            "a": self.control.active,
+                            "ok": spatial_data_valid,
                         }
+                        if spatial_data_valid:
+                            serial_payload["p"] = [
+                                self.telemetry["position"]["x"],
+                                self.telemetry["position"]["y"],
+                                self.telemetry["position"]["z"],
+                            ]
+                            serial_payload["r"] = [
+                                self.telemetry["rotation"]["yaw"],
+                                self.telemetry["rotation"]["pitch"],
+                                self.telemetry["rotation"]["roll"],
+                            ]
+                            serial_payload["e"] = self.telemetry["error"]
                         if self.serial_bridge.send(serial_payload):
                             self.last_serial_payload = serial_payload
             except Exception as exc:
