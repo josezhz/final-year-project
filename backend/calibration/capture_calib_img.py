@@ -3,12 +3,48 @@ import os
 from pseyepy import Camera
 
 # --- CONFIGURATION ---
-SAVE_DIR = "calib_img"
+SAVE_DIR = "backend/calibration/calib_img"
 # MUST match the inner corners of your board (squares minus 1)
 CHESSBOARD_SIZE = (7, 5) 
 
 if not os.path.exists(SAVE_DIR):
     os.makedirs(SAVE_DIR)
+
+
+def remove_stale_images(camera_labels, latest_count):
+    """Trim old calibration images beyond the last snapshot saved this session."""
+    if latest_count <= 0:
+        return
+
+    for label in camera_labels.values():
+        prefix = f"cam{label}_"
+        for filename in os.listdir(SAVE_DIR):
+            if not (filename.startswith(prefix) and filename.endswith(".jpg")):
+                continue
+
+            suffix = filename[len(prefix):-4]
+            if not suffix.isdigit():
+                continue
+
+            if int(suffix) > latest_count:
+                os.remove(os.path.join(SAVE_DIR, filename))
+
+
+def delete_last_saved_images(camera_labels, latest_count):
+    """Delete the most recent snapshot for every labeled camera."""
+    if latest_count <= 0:
+        return 0
+
+    deleted = 0
+    for label in camera_labels.values():
+        filename = f"cam{label}_{latest_count}.jpg"
+        filepath = os.path.join(SAVE_DIR, filename)
+        if os.path.exists(filepath):
+            os.remove(filepath)
+            deleted += 1
+
+    return deleted
+
 
 def main():
     try:
@@ -41,7 +77,7 @@ def main():
 
         # --- STEP 2: CAPTURE SESSION WITH PATTERN RECOGNITION ---
         print("\n--- Capture Mode ---")
-        print("Controls: [Space] to Save, [Q] to Quit")
+        print("Controls: [Space] to Save, [D] to Delete Last Saved, [Q] to Quit")
 
         count = 0
         while True:
@@ -83,8 +119,18 @@ def main():
                     cv.imwrite(filepath, img_to_save)
                 print(f"Saved snapshot #{count} (Ensure pattern was detected for best results!)")
 
+            elif key == ord('d'):
+                deleted = delete_last_saved_images(camera_labels, count)
+                if deleted:
+                    print(f"Deleted snapshot #{count}")
+                    count -= 1
+                else:
+                    print("No saved snapshot to delete.")
+
             elif key == ord('q'):
                 break
+
+        remove_stale_images(camera_labels, count)
 
     except Exception as e:
         print(f"Error: {e}")
