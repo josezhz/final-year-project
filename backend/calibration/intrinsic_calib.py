@@ -5,7 +5,7 @@ import json
 
 # --- SETTINGS ---
 CHECKERBOARD = (7, 5) 
-SQUARE_SIZE = 23.9 / 8 
+SQUARE_SIZE = 0.239 / 8     # [m]
 CAMERA_INDICES = [1, 2, 3]  # List of cameras to process
 
 criteria = (cv.TERM_CRITERIA_EPS + cv.TERM_CRITERIA_MAX_ITER, 30, 0.001)
@@ -21,7 +21,7 @@ all_calibrations = {}
 for cam_idx in CAMERA_INDICES:
     objpoints = [] 
     imgpoints = [] 
-    images = glob.glob(f'calibration/calib_img/cam{cam_idx}_*.jpg')
+    images = glob.glob(f'backend/calibration/calib_img/cam{cam_idx}_*.jpg')
 
     if not images:
         print(f"No images found for Camera {cam_idx}. Skipping...")
@@ -59,7 +59,7 @@ for cam_idx in CAMERA_INDICES:
         print(f"Calibration failed for Camera {cam_idx}")
 
 # --- SAVE ALL DATA TO ONE FILE ---
-output_filename = "calibration/camera_params.json"
+output_filename = "backend/calibration/camera_intrinsics.json"
 with open(output_filename, "w") as f:
     json.dump(all_calibrations, f, indent=4)
 
