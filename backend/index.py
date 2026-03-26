@@ -35,7 +35,7 @@ EXTRINSICS_PATH = BASE_DIR / "calibration" / "camera_extrinsics.json"
 
 HOST = "localhost"
 PORT = 8765
-EXPECTED_CAMERAS = 3
+EXPECTED_CAMERAS = 2
 MIN_BRIGHTNESS = 50
 MAX_LEDS = 3
 MAX_FIT_ERROR = 0.05
@@ -61,8 +61,11 @@ DEFAULT_TELEMETRY = {
     "position": {"x": 0.0, "y": 0.0, "z": 0.0},
     "rotation": {"yaw": 0.0, "pitch": 0.0, "roll": 0.0},
     "error": 0.0,
+    "mapping_error_px": 0.0,
+    "model_fit_error_m": 0.0,
+    "scale_factor": 1.0,
     "solved_led_coordinates": [],
-    "detected_leds_per_camera": [0, 0, 0],
+    "detected_leds_per_camera": [0, 0],
     "spatial_data_valid": False,
 }
 PREVIEW_WIDTH = 240
@@ -269,7 +272,7 @@ def undistort_led_points(led_points, camera_matrix, dist_coeff):
 
 
 def solve_pose_procrustes(points_3d, model_points):
-    """Solve for rotation and translation using Procrustes."""
+    """Solve for scale, rotation, and translation using similarity Procrustes."""
     points_3d = np.asarray(points_3d, dtype=np.float32)
     model_points = np.asarray(model_points, dtype=np.float32)
     
@@ -288,9 +291,16 @@ def solve_pose_procrustes(points_3d, model_points):
         Vt[-1, :] *= -1
         R = Vt.T @ U.T
     
-    t = centroid_data - R @ centroid_model
+    aligned_model = model_centered @ R.T
+    model_variance = float(np.sum(model_centered ** 2))
+    if model_variance <= 1e-9:
+        scale = 1.0
+    else:
+        scale = float(np.sum(data_centered * aligned_model) / model_variance)
     
-    return R, t
+    t = centroid_data - scale * (R @ centroid_model)
+    
+    return scale, R, t
 
 
 def compute_reprojection_error(points_3d, model_points):
@@ -358,8 +368,8 @@ def mapping_temporal_penalty(candidate_points, previous_led_points):
 
 def find_best_clockwise_mapping(all_cam_leds, proj_mats, previous_led_points=None):
     """
-    Since camera view is always from above, only cyclic permutations are valid.
-    Search per-camera cyclic shifts and select the minimum reprojection-cost mapping.
+    Search cyclic LED orderings per camera and select the globally minimum
+    cross-camera reprojection-cost mapping.
     """
     best_cost = float("inf")
     best_reprojection_cost = float("inf")
@@ -429,10 +439,7 @@ def solve_pose(
     precomputed_led_solution=None,
 ):
     """
-    Solve 6DOF pose with clockwise-only mapping search.
-
-    Cameras are above the drone, so each camera sees the same clockwise sequence.
-    The unknown is the per-camera starting index (3 cyclic options per camera).
+    Solve 6DOF pose with cyclic-only mapping search.
     We choose the mapping with minimum cross-camera reprojection error.
     """
     led_solution = precomputed_led_solution or solve_led_positions(all_cam_leds, proj_mats)
@@ -449,10 +456,10 @@ def solve_pose(
         return None
 
     # Solve for pose using Procrustes alignment
-    rotation, translation = solve_pose_procrustes(candidate_points, DRONE_LED_MODEL)
+    scale_factor, rotation, translation = solve_pose_procrustes(candidate_points, DRONE_LED_MODEL)
 
     # Compute fit error
-    transformed_model = (rotation @ DRONE_LED_MODEL.T).T + translation
+    transformed_model = scale_factor * (rotation @ DRONE_LED_MODEL.T).T + translation
     fit_error = compute_reprojection_error(candidate_points, transformed_model)
 
     # Check if fit is acceptable
@@ -468,6 +475,9 @@ def solve_pose(
         "translation_vector": translation,
         "rotation_matrix": rotation,
         "error": round(float(max(fit_error, mapping_cost)), 5),
+        "mapping_error_px": round(float(mapping_cost), 5),
+        "model_fit_error_m": round(float(fit_error), 5),
+        "scale_factor": round(float(scale_factor), 5),
         "solved_led_coordinates": solved_led_coordinates,
         "mapping_shifts": [int(value) for value in mapping_shifts],
         "detected_leds_per_camera": [len(leds) for leds in all_cam_leds],
@@ -820,6 +830,9 @@ class MotionCaptureEngine:
                 "position": {"x": 0.0, "y": 0.0, "z": 0.0},
                 "rotation": {"yaw": 0.0, "pitch": 0.0, "roll": 0.0},
                 "error": 0.0,
+                "mapping_error_px": 0.0,
+                "model_fit_error_m": 0.0,
+                "scale_factor": 1.0,
                 "solved_led_coordinates": [],
                 "detected_leds_per_camera": [len(leds) for leds in all_cam_leds],
                 "spatial_data_valid": False,
@@ -857,6 +870,13 @@ class MotionCaptureEngine:
                     if led_solution is not None
                     else 0.0
                 ),
+                "mapping_error_px": (
+                    round(float(led_solution["mapping_cost"]), 5)
+                    if led_solution is not None
+                    else 0.0
+                ),
+                "model_fit_error_m": 0.0,
+                "scale_factor": 1.0,
                 "solved_led_coordinates": solved_led_coordinates,
                 "detected_leds_per_camera": [len(leds) for leds in all_cam_leds],
                 "spatial_data_valid": False,

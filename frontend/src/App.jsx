@@ -1,12 +1,17 @@
 import { useEffect, useRef, useState } from 'react';
+import { Canvas } from '@react-three/fiber';
+import { Billboard, Grid, Line, OrbitControls, Text } from '@react-three/drei';
 import './App.css';
 
 const EMPTY_TELEMETRY = {
   position: { x: 0, y: 0, z: 0 },
   rotation: { yaw: 0, pitch: 0, roll: 0 },
   error: 0,
+  mapping_error_px: 0,
+  model_fit_error_m: 0,
+  scale_factor: 1,
   solved_led_coordinates: [],
-  detected_leds_per_camera: [0, 0, 0],
+  detected_leds_per_camera: [0, 0],
   spatial_data_valid: false,
 };
 
@@ -24,7 +29,7 @@ const EMPTY_CONTROL = {
 
 const EMPTY_SYSTEM = {
   frontendClients: 0,
-  expectedCameras: 3,
+  expectedCameras: 2,
   connectedCameras: 0,
   cameraIds: [],
   cameraPoses: [],
@@ -53,6 +58,189 @@ function buildLinePath(points, getX, getY) {
   return points
     .map((point, index) => `${index === 0 ? 'M' : 'L'} ${getX(point).toFixed(2)} ${getY(point).toFixed(2)}`)
     .join(' ');
+}
+
+function toScenePoint([x, y, z]) {
+  return [x, z, -y];
+}
+
+function CameraRig({ camera }) {
+  const worldPosition = [
+    Number(camera.position?.x ?? 0),
+    Number(camera.position?.y ?? 0),
+    Number(camera.position?.z ?? 0),
+  ];
+  const position = toScenePoint(worldPosition);
+  const axisLength = 0.12;
+  const frustumLength = 0.14;
+  const frustumHalfSize = 0.05;
+  const axes = {
+    x: (camera.axes?.x ?? [1, 0, 0]).map((value) => Number(value ?? 0)),
+    y: (camera.axes?.y ?? [0, 1, 0]).map((value) => Number(value ?? 0)),
+    z: (camera.axes?.z ?? [0, 0, 1]).map((value) => Number(value ?? 0)),
+  };
+  const addScaled = (base, axis, scale) => [
+    base[0] + axis[0] * scale,
+    base[1] + axis[1] * scale,
+    base[2] + axis[2] * scale,
+  ];
+  const xAxisEnd = toScenePoint(addScaled(worldPosition, axes.x, axisLength));
+  const yAxisEnd = toScenePoint(addScaled(worldPosition, axes.y, axisLength));
+  const zAxisEnd = toScenePoint(addScaled(worldPosition, axes.z, axisLength));
+  const frustumCenter = toScenePoint(addScaled(worldPosition, axes.z, frustumLength));
+  const frustumCorners = [
+    toScenePoint(addScaled(addScaled(addScaled(worldPosition, axes.z, frustumLength), axes.x, frustumHalfSize), axes.y, frustumHalfSize)),
+    toScenePoint(addScaled(addScaled(addScaled(worldPosition, axes.z, frustumLength), axes.x, frustumHalfSize), axes.y, -frustumHalfSize)),
+    toScenePoint(addScaled(addScaled(addScaled(worldPosition, axes.z, frustumLength), axes.x, -frustumHalfSize), axes.y, -frustumHalfSize)),
+    toScenePoint(addScaled(addScaled(addScaled(worldPosition, axes.z, frustumLength), axes.x, -frustumHalfSize), axes.y, frustumHalfSize)),
+  ];
+
+  return (
+    <group>
+      <mesh position={position}>
+        <sphereGeometry args={[0.024, 20, 20]} />
+        <meshStandardMaterial color="#f6f7fb" emissive="#ff9f1c" emissiveIntensity={0.25} />
+      </mesh>
+
+      <Line points={[position, xAxisEnd]} color="#ff9f1c" lineWidth={2} />
+      <Line points={[position, yAxisEnd]} color="#2ec4b6" lineWidth={2} />
+      <Line points={[position, zAxisEnd]} color="#ff6b6b" lineWidth={2} />
+
+      {frustumCorners.map((corner, index) => (
+        <Line key={`${camera.camera}-ray-${index}`} points={[position, corner]} color="#9fb7ff" lineWidth={1.5} />
+      ))}
+      <Line points={[...frustumCorners, frustumCorners[0]]} color="#9fb7ff" lineWidth={1.5} />
+
+      <Billboard position={[position[0], position[1], position[2] + 0.07]}>
+        <Text fontSize={0.045} color="#eff7f6" outlineWidth={0.003} outlineColor="#09111f">
+          {camera.camera.toUpperCase()}
+        </Text>
+      </Billboard>
+    </group>
+  );
+}
+
+function CameraPoseScene({ cameraPoses, telemetry }) {
+  const cameraPoints = (cameraPoses ?? []).map((camera) => ({
+    camera: camera.camera,
+    position: {
+      x: Number(camera.position?.x ?? 0),
+      y: Number(camera.position?.y ?? 0),
+      z: Number(camera.position?.z ?? 0),
+    },
+    axes: {
+      x: (camera.axes?.x ?? [1, 0, 0]).map((value) => Number(value ?? 0)),
+      y: (camera.axes?.y ?? [0, 1, 0]).map((value) => Number(value ?? 0)),
+      z: (camera.axes?.z ?? [0, 0, 1]).map((value) => Number(value ?? 0)),
+    },
+  }));
+
+  const droneWorldPosition = [
+    Number(telemetry.position?.x ?? 0),
+    Number(telemetry.position?.y ?? 0),
+    Number(telemetry.position?.z ?? 0),
+  ];
+  const dronePosition = toScenePoint(droneWorldPosition);
+  const extent = Math.max(
+    0.5,
+    ...cameraPoints.flatMap((camera) => [
+      Math.abs(camera.position.x),
+      Math.abs(camera.position.y),
+      Math.abs(camera.position.z),
+    ]),
+    ...droneWorldPosition.map((value) => Math.abs(value)),
+  );
+  const gridSize = Math.max(2, Math.ceil(extent * 4));
+
+  return (
+    <div className="chart-card">
+      <div className="chart-heading">
+        <div>
+          <span className="meta-label">Extrinsics</span>
+          <strong>3D camera pose view</strong>
+        </div>
+        <span className="chart-window">{cameraPoints.length ? `${cameraPoints.length} cameras` : 'Waiting for poses'}</span>
+      </div>
+
+      <div className="scene-canvas-shell" role="img" aria-label="Interactive 3D camera pose scene">
+        <Canvas camera={{ position: [1.8, -1.8, 1.3], fov: 42 }}>
+          <color attach="background" args={['#0c1526']} />
+          <ambientLight intensity={0.75} />
+          <directionalLight position={[2.5, -3, 4]} intensity={1.2} />
+          <directionalLight position={[-2, 2, 1.5]} intensity={0.45} />
+
+          <Grid
+            args={[gridSize, gridSize]}
+            cellSize={0.1}
+            cellThickness={0.6}
+            cellColor="#335c67"
+            sectionSize={0.5}
+            sectionThickness={1.2}
+            sectionColor="#8fd3c7"
+            fadeDistance={12}
+            fadeStrength={1}
+            infiniteGrid
+          />
+
+          <Line points={[toScenePoint([-extent, 0, 0]), toScenePoint([extent, 0, 0])]} color="#ff9f1c" lineWidth={2} />
+          <Line points={[toScenePoint([0, -extent, 0]), toScenePoint([0, extent, 0])]} color="#2ec4b6" lineWidth={2} />
+          <Line points={[toScenePoint([0, 0, 0]), toScenePoint([0, 0, Math.max(extent, 0.5)])]} color="#ff6b6b" lineWidth={2} />
+
+          <mesh position={toScenePoint([0, 0, 0])}>
+            <sphereGeometry args={[0.028, 20, 20]} />
+            <meshStandardMaterial color="#43aa8b" emissive="#43aa8b" emissiveIntensity={0.35} />
+          </mesh>
+
+          <Billboard position={toScenePoint([extent * 0.9, 0, 0.05])}>
+            <Text fontSize={0.05} color="#ffcf8b" outlineWidth={0.003} outlineColor="#09111f">X</Text>
+          </Billboard>
+          <Billboard position={toScenePoint([0, extent * 0.9, 0.05])}>
+            <Text fontSize={0.05} color="#7ff0e4" outlineWidth={0.003} outlineColor="#09111f">Y</Text>
+          </Billboard>
+          <Billboard position={toScenePoint([0, 0, Math.max(extent, 0.5) + 0.08])}>
+            <Text fontSize={0.05} color="#ff9d9d" outlineWidth={0.003} outlineColor="#09111f">Z</Text>
+          </Billboard>
+
+          {cameraPoints.map((camera) => (
+            <CameraRig key={camera.camera} camera={camera} />
+          ))}
+
+          <mesh position={dronePosition}>
+            <sphereGeometry args={[0.03, 20, 20]} />
+            <meshStandardMaterial
+              color={telemetry.spatial_data_valid ? '#7bdff2' : '#8a97a8'}
+              emissive={telemetry.spatial_data_valid ? '#7bdff2' : '#8a97a8'}
+              emissiveIntensity={0.45}
+            />
+          </mesh>
+          <Billboard position={toScenePoint([droneWorldPosition[0], droneWorldPosition[1], droneWorldPosition[2] + 0.08])}>
+            <Text fontSize={0.045} color="#eff7f6" outlineWidth={0.003} outlineColor="#09111f">
+              Drone
+            </Text>
+          </Billboard>
+
+          <OrbitControls makeDefault enableDamping dampingFactor={0.08} />
+        </Canvas>
+      </div>
+
+      <div className="chart-readout scene-readout">
+        <div>
+          <span className="meta-label">World Origin</span>
+          <strong>(0.000, 0.000, 0.000)</strong>
+        </div>
+        <div>
+          <span className="meta-label">Drone</span>
+          <strong>
+            ({formatNumber(dronePosition.x)}, {formatNumber(dronePosition.y)}, {formatNumber(dronePosition.z)})
+          </strong>
+        </div>
+        <div>
+          <span className="meta-label">Status</span>
+          <strong>{telemetry.spatial_data_valid ? 'Tracking valid' : 'Tracking invalid'}</strong>
+        </div>
+      </div>
+    </div>
+  );
 }
 
 function XYTrajectoryChart({ samples, telemetry }) {
@@ -533,9 +721,24 @@ function App() {
 
             <div className="meta-row">
               <div>
-                <span className="meta-label">Solver error</span>
+                <span className="meta-label">Legacy solver error</span>
                 <strong>{formatNumber(telemetry.error, 5)}</strong>
               </div>
+              <div>
+                <span className="meta-label">Mapping error</span>
+                <strong>{formatNumber(telemetry.mapping_error_px, 5)} px</strong>
+              </div>
+              <div>
+                <span className="meta-label">Model fit</span>
+                <strong>{formatNumber(telemetry.model_fit_error_m, 5)} m</strong>
+              </div>
+              <div>
+                <span className="meta-label">LED model scale</span>
+                <strong>{formatNumber(telemetry.scale_factor, 5)}x</strong>
+              </div>
+            </div>
+
+            <div className="meta-row">
               <div>
                 <span className="meta-label">LEDs per camera</span>
                 <strong>{telemetry.detected_leds_per_camera.join(' / ')}</strong>
@@ -597,6 +800,16 @@ function App() {
               </div>
             </div>
             <TrajectoryPanel telemetry={telemetry} samples={trajectorySamples} />
+          </article>
+
+          <article className="panel panel-poses">
+            <div className="panel-heading">
+              <div>
+                <p className="panel-label">Scene</p>
+                <h2>Camera extrinsics</h2>
+              </div>
+            </div>
+            <CameraPoseScene cameraPoses={system.cameraPoses} telemetry={telemetry} />
           </article>
 
           <article className="panel panel-pid">

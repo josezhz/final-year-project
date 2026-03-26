@@ -36,15 +36,15 @@
 .dashboard {
   position: relative;
   z-index: 1;
-  width: min(1200px, calc(100% - 2rem));
+  width: min(1380px, calc(100% - 1.5rem));
   margin: 0 auto;
-  padding: 2rem 0 3rem;
+  padding: 1rem 0 1.5rem;
 }
 
 .hero {
   display: grid;
-  gap: 1rem;
-  margin-bottom: 1.5rem;
+  gap: 0.6rem;
+  margin-bottom: 0.9rem;
 }
 
 .eyebrow,
@@ -66,21 +66,21 @@
 
 .hero h1 {
   max-width: 12ch;
-  font-size: clamp(2.8rem, 6vw, 4.8rem);
-  line-height: 0.95;
+  font-size: clamp(2.1rem, 4.2vw, 3.5rem);
+  line-height: 0.92;
 }
 
 .hero-copy {
   max-width: 60rem;
   margin: 0;
   color: #c4d9d5;
-  font-size: 1rem;
+  font-size: 0.92rem;
 }
 
 .status-strip {
   display: flex;
   flex-wrap: wrap;
-  gap: 0.75rem;
+  gap: 0.5rem;
 }
 
 .pill,
@@ -88,10 +88,10 @@
   display: inline-flex;
   align-items: center;
   border-radius: 999px;
-  padding: 0.45rem 0.85rem;
+  padding: 0.35rem 0.7rem;
   border: 1px solid rgba(255, 255, 255, 0.12);
   background: rgba(9, 17, 31, 0.5);
-  font-size: 0.9rem;
+  font-size: 0.82rem;
 }
 
 .pill.connected,
@@ -117,15 +117,15 @@
 .layout-grid {
   display: grid;
   grid-template-columns: repeat(12, minmax(0, 1fr));
-  gap: 1rem;
+  gap: 0.75rem;
 }
 
 .panel {
   backdrop-filter: blur(14px);
   background: rgba(8, 15, 28, 0.72);
   border: 1px solid rgba(255, 255, 255, 0.08);
-  border-radius: 24px;
-  padding: 1.25rem;
+  border-radius: 20px;
+  padding: 0.95rem;
   box-shadow: 0 24px 80px rgba(0, 0, 0, 0.24);
 }
 
@@ -133,7 +133,8 @@
 .panel-telemetry,
 .panel-pid,
 .panel-cameras,
-.panel-scene {
+.panel-scene,
+.panel-poses {
   grid-column: span 12;
 }
 
@@ -145,28 +146,28 @@
 .panel-heading {
   display: flex;
   justify-content: space-between;
-  gap: 1rem;
+  gap: 0.75rem;
   align-items: center;
-  margin-bottom: 1rem;
+  margin-bottom: 0.75rem;
 }
 
 .form-grid,
 .metric-grid,
 .system-list {
   display: grid;
-  gap: 0.9rem;
+  gap: 0.65rem;
 }
 
 .form-grid {
-  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(190px, 1fr));
 }
 
 .metric-grid {
-  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(125px, 1fr));
 }
 
 .system-list {
-  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
 }
 
 label,
@@ -174,7 +175,7 @@ label,
 .metric-card,
 .meta-row div {
   display: grid;
-  gap: 0.45rem;
+  gap: 0.3rem;
 }
 
 select,
@@ -188,10 +189,10 @@ select,
 input {
   width: 100%;
   border: 1px solid rgba(255, 255, 255, 0.12);
-  border-radius: 14px;
+  border-radius: 12px;
   background: rgba(255, 255, 255, 0.04);
   color: #eff7f6;
-  padding: 0.8rem 0.9rem;
+  padding: 0.68rem 0.8rem;
 }
 
 select {
@@ -206,7 +207,7 @@ select option {
 button {
   border: 0;
   border-radius: 999px;
-  padding: 0.85rem 1.15rem;
+  padding: 0.7rem 1rem;
   cursor: pointer;
   transition: transform 160ms ease, opacity 160ms ease;
 }
@@ -242,71 +243,74 @@ button:hover {
 .meta-row {
   display: flex;
   flex-wrap: wrap;
-  gap: 0.85rem;
+  gap: 0.6rem;
   align-items: center;
 }
 
 .action-row {
-  margin-top: 1rem;
+  margin-top: 0.75rem;
 }
 
 .hint {
-  margin: 1rem 0 0;
+  margin: 0.75rem 0 0;
   color: #b7c8c5;
+  font-size: 0.92rem;
 }
 
 .metric-card {
   background: rgba(255, 255, 255, 0.04);
   border: 1px solid rgba(255, 255, 255, 0.08);
-  border-radius: 18px;
-  padding: 1rem;
+  border-radius: 14px;
+  padding: 0.8rem 0.85rem;
 }
 
 .metric-card span {
   color: #95b9b3;
+  font-size: 0.88rem;
 }
 
 .metric-card strong,
 .meta-row strong,
 .system-list strong {
-  font-size: 1.1rem;
+  font-size: 1rem;
 }
 
 .meta-row {
-  margin-top: 1rem;
+  margin-top: 0.75rem;
   justify-content: space-between;
 }
 
 .led-coords {
-  margin-top: 0.85rem;
+  margin-top: 0.75rem;
   display: grid;
-  gap: 0.4rem;
+  gap: 0.25rem;
+  font-size: 0.95rem;
 }
 
 .pid-table {
   display: grid;
   grid-template-columns: 110px repeat(3, minmax(0, 1fr));
-  gap: 0.75rem;
+  gap: 0.55rem;
   align-items: center;
 }
 
 .camera-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
-  gap: 1rem;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 0.75rem;
 }
 
 .camera-card {
   margin: 0;
   display: grid;
-  gap: 0.75rem;
+  gap: 0.5rem;
 }
 
 .camera-frame {
   position: relative;
   aspect-ratio: 4 / 3;
   overflow: hidden;
-  border-radius: 18px;
+  border-radius: 14px;
   background:
     linear-gradient(135deg, rgba(255, 159, 28, 0.12), rgba(0, 173, 181, 0.12)),
     rgba(255, 255, 255, 0.03);
@@ -328,16 +332,17 @@ button:hover {
   display: grid;
   place-items: center;
   color: #95b9b3;
-  font-size: 0.95rem;
+  font-size: 0.85rem;
   letter-spacing: 0.04em;
 }
 
 .camera-card figcaption {
   display: flex;
   justify-content: space-between;
-  gap: 0.75rem;
+  gap: 0.5rem;
   align-items: baseline;
   color: #c4d9d5;
+  font-size: 0.85rem;
 }
 
 .camera-card figcaption strong {
@@ -352,16 +357,16 @@ button:hover {
 .trajectory-layout,
 .chart-readout {
   display: grid;
-  gap: 0.9rem;
+  gap: 0.65rem;
 }
 
 .trajectory-layout {
-  grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
 }
 
 .chart-card {
   display: grid;
-  gap: 0.85rem;
+  gap: 0.65rem;
 }
 
 .chart-heading {
@@ -373,14 +378,14 @@ button:hover {
 
 .chart-window {
   color: #ffd699;
-  font-size: 0.88rem;
+  font-size: 0.8rem;
   letter-spacing: 0.04em;
 }
 
 .chart-svg {
   width: 100%;
-  min-height: 20rem;
-  height: 20rem;
+  min-height: 15rem;
+  height: 15rem;
   display: block;
 }
 
@@ -451,21 +456,106 @@ button:hover {
 
 .chart-label {
   fill: #9fc8c0;
-  font-size: 12px;
+  font-size: 11px;
   letter-spacing: 0.04em;
 }
 
 .chart-readout {
-  grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
 }
 
 .chart-readout div {
   display: grid;
   gap: 0.35rem;
-  padding: 0.9rem 1rem;
-  border-radius: 16px;
+  padding: 0.72rem 0.85rem;
+  border-radius: 14px;
   background: rgba(255, 255, 255, 0.04);
   border: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.scene-svg {
+  min-height: 24rem;
+  height: 24rem;
+}
+
+.scene-canvas-shell {
+  min-height: 18rem;
+  height: 18rem;
+  overflow: hidden;
+  border-radius: 16px;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  background:
+    radial-gradient(circle at top, rgba(143, 211, 199, 0.08), transparent 42%),
+    linear-gradient(180deg, rgba(13, 23, 39, 0.96), rgba(9, 17, 31, 0.96));
+}
+
+.scene-canvas-shell canvas {
+  display: block;
+}
+
+.scene-world-axis {
+  stroke-width: 2;
+  stroke-linecap: round;
+  opacity: 0.85;
+}
+
+.world-axis-x {
+  stroke: rgba(255, 191, 105, 0.9);
+}
+
+.world-axis-y {
+  stroke: rgba(123, 223, 242, 0.9);
+}
+
+.world-axis-z {
+  stroke: rgba(143, 211, 199, 0.9);
+}
+
+.scene-axis-label,
+.scene-camera-label,
+.scene-drone-label {
+  fill: #eff7f6;
+  font-size: 13px;
+  letter-spacing: 0.06em;
+}
+
+.scene-camera-axis {
+  stroke-width: 2.4;
+  stroke-linecap: round;
+  opacity: 0.95;
+}
+
+.scene-camera-axis.axis-x {
+  stroke: #ff9f1c;
+}
+
+.scene-camera-axis.axis-y {
+  stroke: #2ec4b6;
+}
+
+.scene-camera-axis.axis-z {
+  stroke: #ff6b6b;
+}
+
+.scene-camera-dot {
+  fill: #eff7f6;
+  stroke: rgba(255, 159, 28, 0.8);
+  stroke-width: 2.5;
+}
+
+.scene-drone-dot {
+  fill: rgba(255, 255, 255, 0.22);
+  stroke: rgba(255, 255, 255, 0.42);
+  stroke-width: 2;
+}
+
+.scene-drone-dot.is-valid {
+  fill: #7bdff2;
+  stroke: rgba(239, 247, 246, 0.85);
+}
+
+.scene-readout {
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
 }
 
 .pid-head {
@@ -486,9 +576,10 @@ button:hover {
 
 pre {
   margin: 0;
-  min-height: 11rem;
-  padding: 1rem;
-  border-radius: 18px;
+  min-height: 8rem;
+  max-height: 16rem;
+  padding: 0.85rem;
+  border-radius: 14px;
   background: rgba(255, 255, 255, 0.04);
   border: 1px solid rgba(255, 255, 255, 0.08);
   color: #d6f8f0;
@@ -503,16 +594,43 @@ pre {
 
   .panel-cameras,
   .panel-scene,
+  .panel-poses,
   .panel-pid {
-    grid-column: span 12;
+    grid-column: span 6;
   }
 
   .panel-system {
-    grid-column: span 5;
+    grid-column: span 4;
   }
 
   .panel-payload {
+    grid-column: span 8;
+  }
+}
+
+@media (min-width: 1200px) {
+  .panel-control {
+    grid-column: span 5;
+  }
+
+  .panel-telemetry {
     grid-column: span 7;
+  }
+
+  .panel-cameras {
+    grid-column: span 5;
+  }
+
+  .panel-scene {
+    grid-column: span 7;
+  }
+
+  .panel-poses {
+    grid-column: span 7;
+  }
+
+  .panel-pid {
+    grid-column: span 5;
   }
 }
 
