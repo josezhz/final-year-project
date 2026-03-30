@@ -41,6 +41,10 @@ const EMPTY_SYSTEM = {
   serialError: '',
   availableSerialPorts: [],
   canSendToEsp32: false,
+  serialForwarding: false,
+  lastSerialSendOk: false,
+  lastSerialSendError: '',
+  lastSerialAttemptPayload: null,
   lastSerialPayload: null,
 };
 
@@ -607,7 +611,9 @@ function App() {
       label: 'Serial link',
       value: system.serialConnected ? 'Connected' : 'Offline',
       tone: system.serialConnected ? 'ready' : 'blocked',
-      detail: system.serialConnected ? system.serialPort || 'Port selected' : system.serialError || 'Select sender COM port',
+      detail: system.serialConnected
+        ? system.lastSerialSendError || system.serialPort || 'Port selected'
+        : system.serialError || 'Select sender COM port',
     },
     {
       label: 'Camera gates',
@@ -617,9 +623,13 @@ function App() {
     },
     {
       label: 'ESP send path',
-      value: system.canSendToEsp32 ? 'Live' : 'Blocked',
-      tone: system.canSendToEsp32 ? 'ready' : 'blocked',
-      detail: system.canSendToEsp32 ? 'Payloads are being forwarded' : 'Needs serial + activation',
+      value: system.serialForwarding ? 'Live' : system.canSendToEsp32 ? 'Armed' : 'Blocked',
+      tone: system.serialForwarding ? 'ready' : system.canSendToEsp32 ? 'pending' : 'blocked',
+      detail: system.serialForwarding
+        ? 'Serial writes are succeeding'
+        : system.canSendToEsp32
+          ? system.lastSerialSendError || 'Waiting for first successful serial frame'
+          : 'Needs serial + activation',
     },
   ];
 
@@ -648,8 +658,12 @@ function App() {
             <span className={`pill ${system.serialConnected ? 'ready' : 'blocked'}`}>
               {system.serialConnected ? `Serial ${system.serialPort}` : 'Serial offline'}
             </span>
-            <span className={`pill ${system.canSendToEsp32 ? 'ready' : 'blocked'}`}>
-              {system.canSendToEsp32 ? 'Sending enabled' : 'Send blocked'}
+            <span
+              className={`pill ${
+                system.serialForwarding ? 'ready' : system.canSendToEsp32 ? 'pending' : 'blocked'
+              }`}
+            >
+              {system.serialForwarding ? 'Sending live' : system.canSendToEsp32 ? 'Send armed' : 'Send blocked'}
             </span>
           </div>
         </section>
@@ -742,7 +756,11 @@ function App() {
               </div>
               <div>
                 <span>Serial state</span>
-                <strong>{system.serialConnected ? 'Connected' : system.serialError || 'Disconnected'}</strong>
+                <strong>
+                  {system.serialConnected
+                    ? system.lastSerialSendError || 'Connected'
+                    : system.serialError || 'Disconnected'}
+                </strong>
               </div>
             </div>
           </article>
@@ -758,7 +776,11 @@ function App() {
             <pre>
               {system.lastSerialPayload
                 ? JSON.stringify(system.lastSerialPayload, null, 2)
-                : 'No payload has been sent yet.'}
+                : system.lastSerialAttemptPayload
+                  ? `No successful payload has been sent yet.\n\nLast attempt status: ${
+                      system.lastSerialSendError || 'Pending'
+                    }\n\n${JSON.stringify(system.lastSerialAttemptPayload, null, 2)}`
+                  : 'No payload has been sent yet.'}
             </pre>
           </article>
 

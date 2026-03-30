@@ -114,6 +114,11 @@
   color: #ffe2ae;
 }
 
+.pill.pending {
+  background: rgba(255, 179, 71, 0.16);
+  color: #ffe2ae;
+}
+
 .layout-grid {
   display: grid;
   grid-template-columns: repeat(12, minmax(0, 1fr));

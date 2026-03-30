@@ -2,14 +2,19 @@
 #include <esp_now.h>
 
 constexpr unsigned long USB_BAUD_RATE = 1000000;
-constexpr size_t MAX_PAYLOAD_LENGTH = 240;
+constexpr size_t MAX_JSON_PAYLOAD_LENGTH = 239;
+constexpr size_t MAX_SERIAL_FRAME_LENGTH = MAX_JSON_PAYLOAD_LENGTH + 1;
 constexpr unsigned long SERIAL_WAIT_MS = 2000;
 
 uint8_t DRONE_MAC_ADDRESS[] = {0x60, 0x55, 0xF9, 0xDA, 0x4E, 0xD4};
 
 struct EspNowMessage {
-  char payload[MAX_PAYLOAD_LENGTH];
+  char payload[MAX_JSON_PAYLOAD_LENGTH + 1];
 };
+
+char incomingFrame[MAX_SERIAL_FRAME_LENGTH + 1] = {};
+size_t incomingFrameLength = 0;
+bool incomingFrameOverflow = false;
 
 void onDataSent(const wifi_tx_info_t *txInfo, esp_now_send_status_t status) {
   (void)txInfo;
@@ -55,8 +60,8 @@ bool initEspNowPeer() {
 
 void sendLineOverEspNow(const String &line) {
   EspNowMessage message = {};
-  const size_t copyLength = min(line.length(), MAX_PAYLOAD_LENGTH - 1);
-  line.substring(0, copyLength).toCharArray(message.payload, MAX_PAYLOAD_LENGTH);
+  const size_t copyLength = min(line.length(), MAX_JSON_PAYLOAD_LENGTH);
+  line.substring(0, copyLength).toCharArray(message.payload, sizeof(message.payload));
 
   const esp_err_t result = esp_now_send(
     DRONE_MAC_ADDRESS,
@@ -64,6 +69,23 @@ void sendLineOverEspNow(const String &line) {
     sizeof(message)
   );
   (void)result;
+}
+
+void processIncomingFrame() {
+  if (incomingFrameOverflow || incomingFrameLength <= 1) {
+    incomingFrameLength = 0;
+    incomingFrameOverflow = false;
+    return;
+  }
+
+  incomingFrame[incomingFrameLength] = '\0';
+  const int droneIndex = incomingFrame[0] - '0';
+  if (droneIndex == 0) {
+    sendLineOverEspNow(String(incomingFrame + 1));
+  }
+
+  incomingFrameLength = 0;
+  incomingFrameOverflow = false;
 }
 
 void setup() {
@@ -84,18 +106,27 @@ void setup() {
 }
 
 void loop() {
-  const int availableBytes = Serial.available();
-  if (availableBytes > 1) {
-    const int droneIndex = Serial.read() - '0';
-    char buffer[MAX_PAYLOAD_LENGTH] = {};
-    const int payloadBytes = min(availableBytes - 1, static_cast<int>(MAX_PAYLOAD_LENGTH - 1));
-    const int bytesRead = Serial.readBytes(buffer, payloadBytes);
-    buffer[bytesRead] = '\0';
-
-    if (droneIndex == 0 && bytesRead > 0) {
-      sendLineOverEspNow(String(buffer));
+  while (Serial.available() > 0) {
+    const char incomingByte = static_cast<char>(Serial.read());
+    if (incomingByte == '\r') {
+      continue;
     }
-  } else {
-    yield();
+    if (incomingByte == '\n') {
+      processIncomingFrame();
+      continue;
+    }
+
+    if (incomingFrameOverflow) {
+      continue;
+    }
+
+    if (incomingFrameLength >= MAX_SERIAL_FRAME_LENGTH) {
+      incomingFrameOverflow = true;
+      continue;
+    }
+
+    incomingFrame[incomingFrameLength++] = incomingByte;
   }
+
+  yield();
 }

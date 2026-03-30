@@ -43,6 +43,9 @@ TRACKING_HZ = 30
 SERIAL_REFRESH_SECONDS = 1.0
 SERIAL_RECONNECT_SECONDS = 1.0
 SERIAL_SETTLE_SECONDS = 2.0
+SERIAL_FRAME_TERMINATOR = b"\n"
+SERIAL_MAX_CONSECUTIVE_FAILURES = 3
+CAMERA_RETRY_SECONDS = 5.0
 DEFAULT_BAUD_RATE = 1000000
 DEFAULT_DRONE_INDEX = 0
 POSITION_JUMP_WEIGHT = 2.0
@@ -510,6 +513,7 @@ class SerialBridge:
         self._last_refresh = 0.0
         self._last_connect_attempt = 0.0
         self._connected_at = 0.0
+        self._consecutive_send_failures = 0
 
     def refresh_ports(self, force=False):
         now = time.time()
@@ -541,26 +545,34 @@ class SerialBridge:
             return False
 
         try:
-            connection = serial.Serial(
-                port=port,
-                baudrate=int(baud_rate),
-                timeout=0.1,
-                write_timeout=1.0,
-                rtscts=False,
-                dsrdtr=False,
-            )
+            connection = serial.Serial()
+            connection.port = port
+            connection.baudrate = int(baud_rate)
+            connection.timeout = 0.1
+            connection.write_timeout = 1.0
+            connection.rtscts = False
+            connection.dsrdtr = False
+            # Keep modem-control lines low so reconnects do not reset the ESP32-S3.
+            try:
+                connection.rts = False
+                connection.dtr = False
+            except Exception:
+                pass
+            connection.open()
             connection.reset_input_buffer()
             connection.reset_output_buffer()
             self.connection = connection
             self.port = port
             self.baud_rate = int(baud_rate)
             self._connected_at = time.time()
+            self._consecutive_send_failures = 0
             self.last_error = ""
             return True
         except Exception as exc:
             self.connection = None
             self.port = ""
             self._connected_at = 0.0
+            self._consecutive_send_failures = 0
             self.last_error = f"Serial connection failed: {exc}"
             return False
 
@@ -585,6 +597,7 @@ class SerialBridge:
         self.connection = None
         self.port = ""
         self._connected_at = 0.0
+        self._consecutive_send_failures = 0
 
     def is_connected(self):
         return bool(self.connection and self.connection.is_open)
@@ -609,15 +622,30 @@ class SerialBridge:
 
         try:
             self.drain_input()
-            frame = f"{int(drone_index)}{json.dumps(payload, separators=(',', ':'))}"
-            encoded = frame.encode("utf-8")
-            self.connection.write(encoded)
-            self.connection.flush()
+            frame = (
+                f"{int(drone_index)}{json.dumps(payload, separators=(',', ':'))}"
+            ).encode("utf-8") + SERIAL_FRAME_TERMINATOR
+            written = self.connection.write(frame)
+            if written != len(frame):
+                raise IOError(
+                    f"Incomplete serial write ({written}/{len(frame)} bytes sent)."
+                )
+            self._consecutive_send_failures = 0
             self.last_error = ""
             return True
         except Exception as exc:
+            self._consecutive_send_failures += 1
             self.last_error = f"Serial write failed: {exc}"
-            self.disconnect()
+            try:
+                if self.is_connected():
+                    self.connection.reset_output_buffer()
+            except Exception:
+                pass
+            if (
+                not self.is_connected()
+                or self._consecutive_send_failures >= SERIAL_MAX_CONSECUTIVE_FAILURES
+            ):
+                self.disconnect()
             return False
 
 
@@ -628,6 +656,7 @@ class MotionCaptureEngine:
         self.camera = None
         self.camera_ids = []
         self.camera_error = ""
+        self._next_camera_retry_at = 0.0
         self.proj_mats = []
         self.camera_matrices = []
         self.dist_coeffs = []
@@ -656,6 +685,8 @@ class MotionCaptureEngine:
     def ensure_camera(self):
         if self.camera is not None:
             return True
+        if time.time() < self._next_camera_retry_at:
+            return False
 
         try:
             camera = Camera(fps=60, resolution=Camera.RES_LARGE, colour=False)
@@ -664,11 +695,13 @@ class MotionCaptureEngine:
                 self.camera_error = (
                     f"Expected {EXPECTED_CAMERAS} cameras but found {len(self.camera_ids)}."
                 )
+                self._next_camera_retry_at = time.time() + CAMERA_RETRY_SECONDS
                 camera.end()
                 return False
 
             self.camera = camera
             self.camera_error = ""
+            self._next_camera_retry_at = 0.0
             self.proj_mats = []
             self.camera_matrices = []
             self.dist_coeffs = []
@@ -710,6 +743,7 @@ class MotionCaptureEngine:
             self.camera = None
             self.camera_ids = []
             self.camera_error = f"Camera initialisation failed: {exc}"
+            self._next_camera_retry_at = time.time() + CAMERA_RETRY_SECONDS
             return False
 
     def close(self):
@@ -720,6 +754,7 @@ class MotionCaptureEngine:
                 pass
         self.camera = None
         self.camera_ids = []
+        self._next_camera_retry_at = 0.0
         self.camera_matrices = []
         self.dist_coeffs = []
         self.last_rotation = None
@@ -929,7 +964,36 @@ class ControlServer:
         self.mocap = MotionCaptureEngine()
         self.telemetry = dict(DEFAULT_TELEMETRY)
         self.last_serial_payload = None
+        self.last_serial_attempt_payload = None
+        self.last_serial_send_ok = False
+        self.last_serial_send_error = ""
         self.state_lock = asyncio.Lock()
+
+    def build_serial_payload(self):
+        spatial_data_valid = self.telemetry["spatial_data_valid"]
+        drone_index = DEFAULT_DRONE_INDEX
+        serial_payload = {
+            "droneIndex": drone_index,
+            "v": 1,
+            "t": round(time.time(), 3),
+            "a": self.control.active,
+            "ok": spatial_data_valid,
+        }
+        if spatial_data_valid:
+            serial_payload["p"] = [
+                self.telemetry["position"]["x"],
+                self.telemetry["position"]["y"],
+                self.telemetry["position"]["z"],
+            ]
+            serial_payload["r"] = [
+                self.telemetry["rotation"]["yaw"],
+                self.telemetry["rotation"]["pitch"],
+                self.telemetry["rotation"]["roll"],
+            ]
+            serial_payload["e"] = self.telemetry["error"]
+        else:
+            serial_payload["m"] = "no data"
+        return drone_index, serial_payload
 
     def build_snapshot(self):
         cameras_connected = len(self.mocap.camera_ids)
@@ -938,6 +1002,7 @@ class ControlServer:
             and self.telemetry["spatial_data_valid"]
         )
         serial_ready = self.serial_bridge.is_connected()
+        serial_send_enabled = self.control.active and serial_ready
         return {
             "type": "state",
             "control": {
@@ -960,7 +1025,11 @@ class ControlServer:
                 "serialPort": self.serial_bridge.port,
                 "serialError": self.serial_bridge.last_error,
                 "availableSerialPorts": self.serial_bridge.available_ports,
-                "canSendToEsp32": self.control.active and serial_ready,
+                "canSendToEsp32": serial_send_enabled,
+                "serialForwarding": serial_send_enabled and self.last_serial_send_ok,
+                "lastSerialSendOk": self.last_serial_send_ok,
+                "lastSerialSendError": self.last_serial_send_error,
+                "lastSerialAttemptPayload": self.last_serial_attempt_payload,
                 "lastSerialPayload": self.last_serial_payload,
             },
         }
@@ -1051,41 +1120,42 @@ class ControlServer:
                             self.control.serial_port,
                             self.control.baud_rate,
                         )
-                    pose = self.mocap.read_pose()
-                    
+                    try:
+                        pose = self.mocap.read_pose()
+                    except Exception as exc:
+                        pose = None
+                        self.mocap.camera_error = f"Tracking input failed: {exc}"
+                        print(f"Tracking input failed: {exc}")
+                        traceback.print_exc()
+
                     if pose is not None:
                         self.telemetry = pose
                     else:
                         self.telemetry = dict(DEFAULT_TELEMETRY)
 
                     snapshot = self.build_snapshot()
-                    
+
                     if snapshot["system"]["canSendToEsp32"]:
-                        spatial_data_valid = self.telemetry["spatial_data_valid"]
-                        drone_index = DEFAULT_DRONE_INDEX
-                        serial_payload = {
-                            "droneIndex": drone_index,
-                            "v": 1,
-                            "t": round(time.time(), 3),
-                            "a": self.control.active,
-                            "ok": spatial_data_valid,
-                        }
-                        if spatial_data_valid:
-                            serial_payload["p"] = [
-                                self.telemetry["position"]["x"],
-                                self.telemetry["position"]["y"],
-                                self.telemetry["position"]["z"],
-                            ]
-                            serial_payload["r"] = [
-                                self.telemetry["rotation"]["yaw"],
-                                self.telemetry["rotation"]["pitch"],
-                                self.telemetry["rotation"]["roll"],
-                            ]
-                            serial_payload["e"] = self.telemetry["error"]
-                        else:
-                            serial_payload["m"] = "no data"
+                        drone_index, serial_payload = self.build_serial_payload()
+                        self.last_serial_attempt_payload = serial_payload
                         if self.serial_bridge.send(drone_index, serial_payload):
                             self.last_serial_payload = serial_payload
+                            self.last_serial_send_ok = True
+                            self.last_serial_send_error = ""
+                        else:
+                            self.last_serial_send_ok = False
+                            self.last_serial_send_error = (
+                                self.serial_bridge.last_error or "Serial send failed."
+                            )
+                    else:
+                        self.last_serial_send_ok = False
+                        if not self.control.active:
+                            self.last_serial_send_error = ""
+                            self.last_serial_attempt_payload = None
+                        elif not self.serial_bridge.is_connected():
+                            self.last_serial_send_error = (
+                                self.serial_bridge.last_error or "Serial link not connected."
+                            )
             except Exception as exc:
                 self.telemetry = dict(DEFAULT_TELEMETRY)
                 self.mocap.camera_error = f"Tracking loop failed: {exc}"
