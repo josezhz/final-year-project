@@ -596,6 +596,32 @@ function App() {
   const isDirty = JSON.stringify(localControl) !== JSON.stringify(serverControl);
   const pidAxes = ['x', 'y', 'z', 'yaw'];
   const pidTerms = ['kp', 'ki', 'kd'];
+  const gateCards = [
+    {
+      label: 'Frontend link',
+      value: connectionState,
+      tone: connectionState === 'Connected' ? 'ready' : connectionState === 'Connecting' ? 'pending' : 'blocked',
+      detail: 'WebSocket session',
+    },
+    {
+      label: 'Serial link',
+      value: system.serialConnected ? 'Connected' : 'Offline',
+      tone: system.serialConnected ? 'ready' : 'blocked',
+      detail: system.serialConnected ? system.serialPort || 'Port selected' : system.serialError || 'Select sender COM port',
+    },
+    {
+      label: 'Camera gates',
+      value: system.camerasReady ? 'Ready' : 'Waiting',
+      tone: system.camerasReady ? 'ready' : 'blocked',
+      detail: `${system.connectedCameras}/${system.expectedCameras} cameras`,
+    },
+    {
+      label: 'ESP send path',
+      value: system.canSendToEsp32 ? 'Live' : 'Blocked',
+      tone: system.canSendToEsp32 ? 'ready' : 'blocked',
+      detail: system.canSendToEsp32 ? 'Payloads are being forwarded' : 'Needs serial + activation',
+    },
+  ];
 
   return (
     <div className="app-shell">
@@ -606,12 +632,11 @@ function App() {
         <section className="hero">
           <div>
             <p className="eyebrow">Python server to ESP32-S3 bridge</p>
-            <h1>Frontend-controlled motion data streaming</h1>
+            <h1>Motion capture control desk</h1>
             <p className="hero-copy">
-              The server only transmits when all three cameras are communicating, the
-              frontend has activated the pipeline, and the ESP32-S3 serial link is open.
-              If tracking is invalid, the payload is still sent but marked as having no
-              valid spatial data.
+              Connect the sender first, confirm the backend gates, then watch tracking and
+              outgoing payloads in one place. When pose data is unavailable, the server still
+              emits an explicit invalid-data payload for the ESP path.
             </p>
           </div>
 
@@ -684,11 +709,74 @@ function App() {
             </p>
           </article>
 
-            <article className="panel panel-telemetry">
+          <article className="panel panel-overview">
+            <div className="panel-heading">
+              <div>
+                <p className="panel-label">Overview</p>
+                <h2>Readiness and routing</h2>
+              </div>
+            </div>
+
+            <div className="gate-grid">
+              {gateCards.map((gate) => (
+                <div key={gate.label} className={`gate-card ${gate.tone}`}>
+                  <span className="meta-label">{gate.label}</span>
+                  <strong>{gate.value}</strong>
+                  <small>{gate.detail}</small>
+                </div>
+              ))}
+            </div>
+
+            <div className="system-list compact">
+              <div>
+                <span>Frontend clients</span>
+                <strong>{system.frontendClients}</strong>
+              </div>
+              <div>
+                <span>Camera IDs</span>
+                <strong>{system.cameraIds.length ? system.cameraIds.join(', ') : 'Unavailable'}</strong>
+              </div>
+              <div>
+                <span>Camera state</span>
+                <strong>{system.camerasReady ? 'Valid spatial data' : system.cameraError || 'Tracking invalid'}</strong>
+              </div>
+              <div>
+                <span>Serial state</span>
+                <strong>{system.serialConnected ? 'Connected' : system.serialError || 'Disconnected'}</strong>
+              </div>
+            </div>
+          </article>
+
+          <article className="panel panel-payload">
+            <div className="panel-heading">
+              <div>
+                <p className="panel-label">Serial payload</p>
+                <h2>Latest JSON sent to ESP32-S3</h2>
+              </div>
+            </div>
+
+            <pre>
+              {system.lastSerialPayload
+                ? JSON.stringify(system.lastSerialPayload, null, 2)
+                : 'No payload has been sent yet.'}
+            </pre>
+          </article>
+
+          <article className="panel panel-poses">
+            <div className="panel-heading">
+              <div>
+                <p className="panel-label">Scene</p>
+                <h2>Camera extrinsics</h2>
+              </div>
+            </div>
+            <CameraPoseScene cameraPoses={system.cameraPoses} telemetry={telemetry} />
+          </article>
+
+          <article className="panel panel-telemetry">
             <div className="panel-heading">
               <div>
                 <p className="panel-label">Telemetry</p>
-                <h2>Spatial data</h2>
+                <h2>Pose and solver status</h2>
               </div>
             </div>
 
@@ -763,7 +851,7 @@ function App() {
             <div className="panel-heading">
               <div>
                 <p className="panel-label">Vision</p>
-                <h2>Live camera previews</h2>
+                <h2>Camera previews</h2>
               </div>
             </div>
 
@@ -796,20 +884,10 @@ function App() {
             <div className="panel-heading">
               <div>
                 <p className="panel-label">Trajectory</p>
-                <h2>Realtime motion diagrams</h2>
+                <h2>Live motion plots</h2>
               </div>
             </div>
             <TrajectoryPanel telemetry={telemetry} samples={trajectorySamples} />
-          </article>
-
-          <article className="panel panel-poses">
-            <div className="panel-heading">
-              <div>
-                <p className="panel-label">Scene</p>
-                <h2>Camera extrinsics</h2>
-              </div>
-            </div>
-            <CameraPoseScene cameraPoses={system.cameraPoses} telemetry={telemetry} />
           </article>
 
           <article className="panel panel-pid">
@@ -843,49 +921,6 @@ function App() {
                 </div>
               ))}
             </div>
-          </article>
-
-          <article className="panel panel-system">
-            <div className="panel-heading">
-              <div>
-                <p className="panel-label">System</p>
-                <h2>Backend gates</h2>
-              </div>
-            </div>
-
-            <div className="system-list">
-              <div>
-                <span>Frontend clients</span>
-                <strong>{system.frontendClients}</strong>
-              </div>
-              <div>
-                <span>Camera IDs</span>
-                <strong>{system.cameraIds.length ? system.cameraIds.join(', ') : 'Unavailable'}</strong>
-              </div>
-              <div>
-                <span>Camera state</span>
-                <strong>{system.camerasReady ? 'Valid spatial data' : system.cameraError || 'Tracking invalid'}</strong>
-              </div>
-              <div>
-                <span>Serial state</span>
-                <strong>{system.serialConnected ? 'Connected' : system.serialError || 'Disconnected'}</strong>
-              </div>
-            </div>
-          </article>
-
-          <article className="panel panel-payload">
-            <div className="panel-heading">
-              <div>
-                <p className="panel-label">Serial payload</p>
-                <h2>Latest JSON sent to ESP32-S3</h2>
-              </div>
-            </div>
-
-            <pre>
-              {system.lastSerialPayload
-                ? JSON.stringify(system.lastSerialPayload, null, 2)
-                : 'No payload has been sent yet.'}
-            </pre>
           </article>
         </section>
       </main>

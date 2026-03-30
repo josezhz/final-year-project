@@ -1,17 +1,15 @@
 #include <WiFi.h>
 #include <esp_now.h>
 
-constexpr unsigned long USB_BAUD_RATE = 115200;
+constexpr unsigned long USB_BAUD_RATE = 1000000;
 constexpr size_t MAX_PAYLOAD_LENGTH = 240;
 constexpr unsigned long SERIAL_WAIT_MS = 2000;
 
-uint8_t DRONE_MAC_ADDRESS[] = {0x60, 0x55, 0xf9, 0xda, 0x4e, 0xd4};
+uint8_t DRONE_MAC_ADDRESS[] = {0x60, 0x55, 0xF9, 0xDA, 0x4E, 0xD4};
 
 struct EspNowMessage {
   char payload[MAX_PAYLOAD_LENGTH];
 };
-
-String incomingLine;
 
 void onDataSent(const wifi_tx_info_t *txInfo, esp_now_send_status_t status) {
   (void)txInfo;
@@ -70,10 +68,6 @@ void sendLineOverEspNow(const String &line) {
 
 void setup() {
   Serial.begin(USB_BAUD_RATE);
-  const unsigned long waitStart = millis();
-  while (!Serial && (millis() - waitStart) < SERIAL_WAIT_MS) {
-    delay(10);
-  }
 
   delay(250);
   Serial.println();
@@ -90,22 +84,18 @@ void setup() {
 }
 
 void loop() {
-  while (Serial.available() > 0) {
-    const char nextChar = static_cast<char>(Serial.read());
+  const int availableBytes = Serial.available();
+  if (availableBytes > 1) {
+    const int droneIndex = Serial.read() - '0';
+    char buffer[MAX_PAYLOAD_LENGTH] = {};
+    const int payloadBytes = min(availableBytes - 1, static_cast<int>(MAX_PAYLOAD_LENGTH - 1));
+    const int bytesRead = Serial.readBytes(buffer, payloadBytes);
+    buffer[bytesRead] = '\0';
 
-    if (nextChar == '\r') {
-      continue;
+    if (droneIndex == 0 && bytesRead > 0) {
+      sendLineOverEspNow(String(buffer));
     }
-
-    if (nextChar == '\n') {
-      incomingLine.trim();
-      if (incomingLine.length() > 0) {
-        sendLineOverEspNow(incomingLine);
-      }
-      incomingLine = "";
-      continue;
-    }
-
-    incomingLine += nextChar;
+  } else {
+    yield();
   }
 }

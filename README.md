@@ -18,7 +18,7 @@ The backend in `backend/index.py` uses OpenCV, NumPy, `pseyepy`, `websockets`, a
 - detect LED points from the three camera feeds
 - estimate 3D pose from multi-view triangulation
 - accept activation, serial settings, and PID values from the frontend over WebSocket
-- stream newline-delimited JSON payloads to the ESP32-S3 over the selected serial port only when the camera and serial gates are both ready
+- stream `droneIndex + compact JSON + newline` frames to the ESP32-S3 over the selected serial port only when the camera and serial gates are both ready
 
 Install the required Python packages in your environment before running it.
 
@@ -43,14 +43,15 @@ The UI connects to `ws://localhost:8765` and owns all operator input:
 
 ## ESP32 boards
 
-Flash `esp32-s3-sender/esp32-s3-sender.ino` to the ESP32-S3. It listens for newline-delimited JSON from the Python server over USB serial and forwards each full line to the ESP32-S2 over ESP-NOW.
+Flash `esp32-s3-sender/esp32-s3-sender.ino` to the ESP32-S3. It listens for `droneIndex + JSON + newline` frames from the Python server over USB serial, strips the leading index byte, and forwards the JSON body to the matching ESP32-S2 peer over ESP-NOW.
 
 Flash `esp32-s2-drone/esp32-s2-drone.ino` to the ESP32-S2. It receives ESP-NOW messages and prints each payload to its USB serial monitor.
 
 Setup notes:
 
 - Open the ESP32-S2 serial monitor once after flashing and note the printed station MAC address.
-- Copy that MAC address into `DRONE_MAC_ADDRESS` in `esp32-s3-sender/esp32-s3-sender.ino`.
+- Copy that MAC address into `DRONE_MAC_ADDRESSES` in `esp32-s3-sender/esp32-s3-sender.ino`.
+- Index `0` in `DRONE_MAC_ADDRESSES` currently matches the backend's default `droneIndex` value.
 - ESP-NOW payloads in this implementation are limited to 239 characters plus the null terminator.
 
 ## Run flow

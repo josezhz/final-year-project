@@ -130,15 +130,12 @@
 }
 
 .panel-control,
+.panel-overview,
 .panel-telemetry,
 .panel-pid,
 .panel-cameras,
 .panel-scene,
-.panel-poses {
-  grid-column: span 12;
-}
-
-.panel-system,
+.panel-poses,
 .panel-payload {
   grid-column: span 12;
 }
@@ -153,7 +150,8 @@
 
 .form-grid,
 .metric-grid,
-.system-list {
+.system-list,
+.gate-grid {
   display: grid;
   gap: 0.65rem;
 }
@@ -170,10 +168,20 @@
   grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
 }
 
+.system-list.compact {
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+}
+
+.gate-grid {
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  margin-bottom: 0.75rem;
+}
+
 label,
 .system-list div,
 .metric-card,
-.meta-row div {
+.meta-row div,
+.gate-card {
   display: grid;
   gap: 0.3rem;
 }
@@ -262,6 +270,34 @@ button:hover {
   border: 1px solid rgba(255, 255, 255, 0.08);
   border-radius: 14px;
   padding: 0.8rem 0.85rem;
+}
+
+.gate-card {
+  padding: 0.9rem;
+  border-radius: 16px;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  background: rgba(255, 255, 255, 0.04);
+}
+
+.gate-card strong {
+  font-size: 1.2rem;
+}
+
+.gate-card small {
+  color: #b7c8c5;
+  font-size: 0.84rem;
+}
+
+.gate-card.ready {
+  background: linear-gradient(180deg, rgba(67, 170, 139, 0.2), rgba(255, 255, 255, 0.04));
+}
+
+.gate-card.blocked {
+  background: linear-gradient(180deg, rgba(225, 87, 89, 0.18), rgba(255, 255, 255, 0.04));
+}
+
+.gate-card.pending {
+  background: linear-gradient(180deg, rgba(255, 179, 71, 0.18), rgba(255, 255, 255, 0.04));
 }
 
 .metric-card span {
@@ -588,6 +624,8 @@ pre {
 
 @media (min-width: 900px) {
   .panel-control,
+  .panel-overview,
+  .panel-payload,
   .panel-telemetry {
     grid-column: span 6;
   }
@@ -599,22 +637,23 @@ pre {
     grid-column: span 6;
   }
 
-  .panel-system {
-    grid-column: span 4;
-  }
-
-  .panel-payload {
-    grid-column: span 8;
-  }
 }
 
 @media (min-width: 1200px) {
   .panel-control {
-    grid-column: span 5;
+    grid-column: span 4;
+  }
+
+  .panel-overview {
+    grid-column: span 4;
+  }
+
+  .panel-payload {
+    grid-column: span 4;
   }
 
   .panel-telemetry {
-    grid-column: span 7;
+    grid-column: span 5;
   }
 
   .panel-cameras {

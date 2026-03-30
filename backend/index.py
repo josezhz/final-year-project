@@ -43,7 +43,8 @@ TRACKING_HZ = 30
 SERIAL_REFRESH_SECONDS = 1.0
 SERIAL_RECONNECT_SECONDS = 1.0
 SERIAL_SETTLE_SECONDS = 2.0
-DEFAULT_BAUD_RATE = 115200
+DEFAULT_BAUD_RATE = 1000000
+DEFAULT_DRONE_INDEX = 0
 POSITION_JUMP_WEIGHT = 2.0
 PREVIEW_HZ = 5
 
@@ -599,7 +600,7 @@ class SerialBridge:
         except Exception:
             pass
 
-    def send(self, payload):
+    def send(self, drone_index, payload):
         if not self.is_connected():
             return False
         if (time.time() - self._connected_at) < SERIAL_SETTLE_SECONDS:
@@ -608,7 +609,8 @@ class SerialBridge:
 
         try:
             self.drain_input()
-            encoded = (json.dumps(payload, separators=(",", ":")) + "\n").encode("utf-8")
+            frame = f"{int(drone_index)}{json.dumps(payload, separators=(',', ':'))}"
+            encoded = frame.encode("utf-8")
             self.connection.write(encoded)
             self.connection.flush()
             self.last_error = ""
@@ -1060,7 +1062,9 @@ class ControlServer:
                     
                     if snapshot["system"]["canSendToEsp32"]:
                         spatial_data_valid = self.telemetry["spatial_data_valid"]
+                        drone_index = DEFAULT_DRONE_INDEX
                         serial_payload = {
+                            "droneIndex": drone_index,
                             "v": 1,
                             "t": round(time.time(), 3),
                             "a": self.control.active,
@@ -1078,7 +1082,9 @@ class ControlServer:
                                 self.telemetry["rotation"]["roll"],
                             ]
                             serial_payload["e"] = self.telemetry["error"]
-                        if self.serial_bridge.send(serial_payload):
+                        else:
+                            serial_payload["m"] = "no data"
+                        if self.serial_bridge.send(drone_index, serial_payload):
                             self.last_serial_payload = serial_payload
             except Exception as exc:
                 self.telemetry = dict(DEFAULT_TELEMETRY)
