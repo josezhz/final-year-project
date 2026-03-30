@@ -4,8 +4,8 @@ import glob
 import json
 
 # --- SETTINGS ---
-CHECKERBOARD = (7, 5) 
-SQUARE_SIZE = 0.239 / 8     # [m]
+CHECKERBOARD = (9, 14) 
+SQUARE_SIZE = 0.2685 / 15     # [m]
 CAMERA_INDICES = [1, 2, 3]  # List of cameras to process
 
 criteria = (cv.TERM_CRITERIA_EPS + cv.TERM_CRITERIA_MAX_ITER, 30, 0.001)

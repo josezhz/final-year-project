@@ -5,7 +5,7 @@ from pseyepy import Camera
 # --- CONFIGURATION ---
 SAVE_DIR = "backend/calibration/calib_img"
 # MUST match the inner corners of your board (squares minus 1)
-CHESSBOARD_SIZE = (7, 5) 
+CHESSBOARD_SIZE = (9, 14) 
 
 if not os.path.exists(SAVE_DIR):
     os.makedirs(SAVE_DIR)
