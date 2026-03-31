@@ -15,8 +15,6 @@ const EMPTY_TELEMETRY = {
   spatial_data_valid: false,
 };
 
-const POSITION_PID_AXES = ['x', 'y', 'z', 'yaw'];
-const ATTITUDE_PID_AXES = ['roll', 'pitch', 'yawRate'];
 const PID_TERMS = ['kp', 'ki', 'kd'];
 const DEFAULT_PID = {
   x: { kp: 6, ki: 0, kd: 2.2 },
@@ -259,7 +257,7 @@ function CameraPoseScene({ cameraPoses, telemetry }) {
         <div>
           <span className="meta-label">Drone</span>
           <strong>
-            ({formatNumber(dronePosition.x)}, {formatNumber(dronePosition.y)}, {formatNumber(dronePosition.z)})
+            ({formatNumber(droneWorldPosition[0])}, {formatNumber(droneWorldPosition[1])}, {formatNumber(droneWorldPosition[2])})
           </strong>
         </div>
         <div>
@@ -345,7 +343,7 @@ function XYTrajectoryChart({ samples, telemetry }) {
         {path ? <path d={path} className="chart-line chart-line-xy" /> : null}
         {samples.map((sample, index) => (
           <circle
-            key={sample.t}
+            key={sample.id}
             cx={scaleX(sample.x)}
             cy={scaleY(sample.y)}
             r={index === samples.length - 1 ? 4.5 : 2.25}
@@ -459,7 +457,7 @@ function ZTimelineChart({ samples, telemetry }) {
         {path ? <path d={path} className="chart-line chart-line-z" /> : null}
         {samples.map((sample, index) => (
           <circle
-            key={sample.t}
+            key={sample.id}
             cx={scaleX(sample.t)}
             cy={scaleY(sample.z)}
             r={index === samples.length - 1 ? 4.5 : 2.25}
@@ -517,9 +515,138 @@ function TrajectoryPanel({ telemetry, samples }) {
   );
 }
 
+function wrapAngleDegrees(value) {
+  let angle = Number(value ?? 0);
+  while (angle > 180) {
+    angle -= 360;
+  }
+  while (angle < -180) {
+    angle += 360;
+  }
+  return angle;
+}
+
+function formatSignedNumber(value, digits = 3) {
+  const numeric = Number(value ?? 0);
+  return `${numeric > 0 ? '+' : ''}${numeric.toFixed(digits)}`;
+}
+
+function SnapshotCard({ label, current, target, error, unit, digits = 3, tolerance = 0.05 }) {
+  const stateClass =
+    Math.abs(error) <= tolerance ? 'settled' : Math.abs(error) <= tolerance * 2 ? 'watch' : 'wide';
+
+  return (
+    <div className={`snapshot-card ${stateClass}`}>
+      <div className="snapshot-heading">
+        <span className="meta-label">{label}</span>
+        <strong>{Math.abs(error) <= tolerance ? 'In band' : 'Needs trim'}</strong>
+      </div>
+      <div className="snapshot-values">
+        <div>
+          <span>Current</span>
+          <strong>
+            {formatNumber(current, digits)}
+            {unit}
+          </strong>
+        </div>
+        <div>
+          <span>Target</span>
+          <strong>
+            {formatNumber(target, digits)}
+            {unit}
+          </strong>
+        </div>
+        <div>
+          <span>Error</span>
+          <strong>
+            {formatSignedNumber(error, digits)}
+            {unit}
+          </strong>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function PidAxisCard({
+  tone,
+  axisLabel,
+  title,
+  description,
+  pid,
+  step,
+  liveLabel,
+  liveValue,
+  liveDigits = 3,
+  targetLabel,
+  targetValue,
+  targetDigits = 3,
+  errorLabel,
+  errorValue,
+  errorDigits = 3,
+  unit = '',
+  note,
+  onChange,
+}) {
+  return (
+    <div className={`pid-axis-card ${tone}`}>
+      <div className="pid-axis-head">
+        <div>
+          <span className="meta-label">{axisLabel}</span>
+          <h3>{title}</h3>
+        </div>
+        <span className="axis-chip">{tone === 'outer' ? 'Outer loop' : 'Inner loop'}</span>
+      </div>
+
+      <p className="axis-copy">{description}</p>
+
+      <div className="pid-readout-grid">
+        <div className="pid-readout">
+          <span>{liveLabel}</span>
+          <strong>
+            {formatNumber(liveValue, liveDigits)}
+            {unit}
+          </strong>
+        </div>
+        <div className="pid-readout">
+          <span>{targetLabel}</span>
+          <strong>
+            {formatNumber(targetValue, targetDigits)}
+            {unit}
+          </strong>
+        </div>
+        <div className="pid-readout">
+          <span>{errorLabel}</span>
+          <strong>
+            {formatSignedNumber(errorValue, errorDigits)}
+            {unit}
+          </strong>
+        </div>
+      </div>
+
+      <div className="pid-input-row">
+        {PID_TERMS.map((term) => (
+          <label className="pid-term-field" key={`${axisLabel}-${term}`}>
+            <span>{term.toUpperCase()}</span>
+            <input
+              type="number"
+              step={step}
+              value={pid[term]}
+              onChange={(event) => onChange(term, event.target.value)}
+            />
+          </label>
+        ))}
+      </div>
+
+      <p className="axis-note">{note}</p>
+    </div>
+  );
+}
+
 function App() {
   const socketRef = useRef(null);
   const hasInitialisedControl = useRef(false);
+  const trajectorySampleIdRef = useRef(0);
   const [connectionState, setConnectionState] = useState('Connecting');
   const [serverControl, setServerControl] = useState(EMPTY_CONTROL);
   const [localControl, setLocalControl] = useState(EMPTY_CONTROL);
@@ -560,6 +687,7 @@ function App() {
         const next = [
           ...current,
           {
+            id: trajectorySampleIdRef.current += 1,
             t: now,
             x: Number(payload.telemetry.position?.x ?? 0),
             y: Number(payload.telemetry.position?.y ?? 0),
@@ -656,6 +784,22 @@ function App() {
   };
 
   const isDirty = JSON.stringify(localControl) !== JSON.stringify(serverControl);
+  const livePosition = {
+    x: Number(telemetry.position?.x ?? 0),
+    y: Number(telemetry.position?.y ?? 0),
+    z: Number(telemetry.position?.z ?? 0),
+  };
+  const liveRotation = {
+    yaw: Number(telemetry.rotation?.yaw ?? 0),
+    pitch: Number(telemetry.rotation?.pitch ?? 0),
+    roll: Number(telemetry.rotation?.roll ?? 0),
+  };
+  const targetError = {
+    x: Number(localControl.target.x ?? 0) - livePosition.x,
+    y: Number(localControl.target.y ?? 0) - livePosition.y,
+    z: Number(localControl.target.z ?? 0) - livePosition.z,
+    yaw: wrapAngleDegrees(Number(localControl.target.yaw ?? 0) - liveRotation.yaw),
+  };
   const gateCards = [
     {
       label: 'Frontend link',
@@ -702,6 +846,162 @@ function App() {
           : 'Needs serial + stream',
     },
   ];
+  const snapshotCards = [
+    {
+      label: 'X hold',
+      current: livePosition.x,
+      target: localControl.target.x,
+      error: targetError.x,
+      unit: ' m',
+      tolerance: 0.03,
+    },
+    {
+      label: 'Y hold',
+      current: livePosition.y,
+      target: localControl.target.y,
+      error: targetError.y,
+      unit: ' m',
+      tolerance: 0.03,
+    },
+    {
+      label: 'Z hold',
+      current: livePosition.z,
+      target: localControl.target.z,
+      error: targetError.z,
+      unit: ' m',
+      tolerance: 0.04,
+    },
+    {
+      label: 'Heading',
+      current: liveRotation.yaw,
+      target: localControl.target.yaw,
+      error: targetError.yaw,
+      unit: ' deg',
+      digits: 2,
+      tolerance: 5,
+    },
+  ];
+  const outerLoopCards = [
+    {
+      axis: 'x',
+      axisLabel: 'X position',
+      title: 'Correct left-right drift',
+      description: 'Use this loop to settle sideways drift before pushing the inner attitude gains harder.',
+      liveLabel: 'Current X',
+      liveValue: livePosition.x,
+      targetLabel: 'Target X',
+      targetValue: localControl.target.x,
+      errorLabel: 'X error',
+      errorValue: targetError.x,
+      unit: ' m',
+      step: '0.01',
+      note: 'Raise Kp until the craft returns crisply, then add Kd to calm overshoot.',
+    },
+    {
+      axis: 'y',
+      axisLabel: 'Y position',
+      title: 'Lock the forward lane',
+      description: 'Tune this with the body-frame forward direction in mind so nose alignment stays intuitive.',
+      liveLabel: 'Current Y',
+      liveValue: livePosition.y,
+      targetLabel: 'Target Y',
+      targetValue: localControl.target.y,
+      errorLabel: 'Y error',
+      errorValue: targetError.y,
+      unit: ' m',
+      step: '0.01',
+      note: 'Finish one lateral axis at a time so cross-coupling remains easy to see.',
+    },
+    {
+      axis: 'z',
+      axisLabel: 'Z altitude',
+      title: 'Balance the hover column',
+      description: 'Altitude gains shape how quickly the brushed motors recover after vertical disturbances.',
+      liveLabel: 'Current Z',
+      liveValue: livePosition.z,
+      targetLabel: 'Target Z',
+      targetValue: localControl.target.z,
+      errorLabel: 'Z error',
+      errorValue: targetError.z,
+      unit: ' m',
+      step: '0.01',
+      note: 'Use Ki carefully here if the drone slowly sags below the desired hover height.',
+    },
+    {
+      axis: 'yaw',
+      axisLabel: 'Yaw heading',
+      title: 'Point the frame cleanly',
+      description: 'Heading should settle before you trust XY response, especially with mocap-defined forward.',
+      liveLabel: 'Current yaw',
+      liveValue: liveRotation.yaw,
+      targetLabel: 'Target yaw',
+      targetValue: localControl.target.yaw,
+      errorLabel: 'Yaw error',
+      errorValue: targetError.yaw,
+      liveDigits: 2,
+      targetDigits: 2,
+      errorDigits: 2,
+      unit: ' deg',
+      step: '0.01',
+      note: 'Keep yaw slightly overdamped so position tuning is not contaminated by heading wander.',
+    },
+  ];
+  const innerLoopCards = [
+    {
+      axis: 'roll',
+      axisLabel: 'Roll hold',
+      title: 'Stiffen lateral attitude',
+      description: 'These gains close the fast loop around the MPU6050 and clean up side-to-side tilt.',
+      liveLabel: 'Mocap roll',
+      liveValue: liveRotation.roll,
+      targetLabel: 'Trim target',
+      targetValue: 0,
+      errorLabel: 'Roll offset',
+      errorValue: -liveRotation.roll,
+      liveDigits: 2,
+      targetDigits: 2,
+      errorDigits: 2,
+      unit: ' deg',
+      step: '0.0001',
+      note: 'The actual feedback lives on the drone; this readout is a mocap cross-check.',
+    },
+    {
+      axis: 'pitch',
+      axisLabel: 'Pitch hold',
+      title: 'Clean up fore-aft attitude',
+      description: 'Pitch damping is what stops forward corrections from turning into a pogoing hover.',
+      liveLabel: 'Mocap pitch',
+      liveValue: liveRotation.pitch,
+      targetLabel: 'Trim target',
+      targetValue: 0,
+      errorLabel: 'Pitch offset',
+      errorValue: -liveRotation.pitch,
+      liveDigits: 2,
+      targetDigits: 2,
+      errorDigits: 2,
+      unit: ' deg',
+      step: '0.0001',
+      note: 'Raise Kd until the nose stops snapping past level after a brief disturbance.',
+    },
+    {
+      axis: 'yawRate',
+      axisLabel: 'Yaw rate',
+      title: 'Damp spin authority',
+      description: 'This loop catches rotational velocity after the outer yaw loop requests a heading correction.',
+      liveLabel: 'Yaw cap (deg/s)',
+      liveValue: localControl.limits.maxYawRateDeg,
+      targetLabel: 'Live yaw (deg)',
+      targetValue: liveRotation.yaw,
+      errorLabel: 'Target yaw (deg)',
+      errorValue: localControl.target.yaw,
+      liveDigits: 1,
+      targetDigits: 2,
+      errorDigits: 2,
+      unit: '',
+      step: '0.0001',
+      note: 'Pair this with the yaw-rate limit so the brushed motors do not saturate during turns.',
+    },
+  ];
 
   return (
     <div className="app-shell">
@@ -712,11 +1012,11 @@ function App() {
         <section className="hero">
           <div>
             <p className="eyebrow">Python server to ESP32-S3 bridge</p>
-            <h1>Motion capture control desk</h1>
+            <h1>Hover tuning workbench</h1>
             <p className="hero-copy">
-              Drive the hover stack from one place: tune outer and inner PID loops, set the
-              mocap target pose, arm from the frontend, and watch the exact compact payload
-              heading to the ESP32-S3 relay.
+              Tune the hover stack in the order you actually fly it: watch live target error,
+              shape the world-frame loops first, then tighten the inner attitude loops while
+              keeping the relay path and arm state in view.
             </p>
           </div>
 
@@ -1098,72 +1398,111 @@ function App() {
           </article>
 
           <article className="panel panel-pid">
-            <div className="panel-heading">
+            <div className="panel-heading panel-heading-emphasis">
               <div>
                 <p className="panel-label">Hover tuning</p>
                 <h2>Outer and inner PID loops</h2>
               </div>
-              <span className={`mini-badge ${isDirty ? 'dirty' : 'clean'}`}>
-                {isDirty ? 'Unsaved changes' : 'Synced'}
-              </span>
+              <div className="panel-actions">
+                <span className={`mini-badge ${isDirty ? 'dirty' : 'clean'}`}>
+                  {isDirty ? 'Unsaved changes' : 'Synced'}
+                </span>
+                <button className="ghost-button" onClick={captureCurrentPoseAsTarget}>
+                  Use current pose
+                </button>
+                <button className="primary-button" onClick={() => applyControl()}>
+                  Apply tuning
+                </button>
+              </div>
             </div>
 
-            <div className="pid-stack">
-              <div className="subsection-card">
-                <div className="subsection-head">
-                  <span className="meta-label">Outer loop</span>
-                  <strong>World-frame position and yaw</strong>
-                </div>
-                <div className="pid-table">
-                  <div className="pid-head">Axis</div>
-                  <div className="pid-head">Kp</div>
-                  <div className="pid-head">Ki</div>
-                  <div className="pid-head">Kd</div>
-                  {POSITION_PID_AXES.map((axis) => (
-                    <div className="pid-row" key={axis}>
-                      <div className="pid-axis">{axis.toUpperCase()}</div>
-                      {PID_TERMS.map((term) => (
-                        <input
-                          key={`${axis}-${term}`}
-                          type="number"
-                          step="0.01"
-                          value={localControl.pid[axis][term]}
-                          onChange={(event) => updatePidValue(axis, term, event.target.value)}
-                        />
-                      ))}
-                    </div>
-                  ))}
-                </div>
-              </div>
+            <div className="pid-summary-grid">
+              {snapshotCards.map((card) => (
+                <SnapshotCard key={card.label} {...card} />
+              ))}
+            </div>
 
-              <div className="subsection-card">
-                <div className="subsection-head">
-                  <span className="meta-label">Inner loop</span>
-                  <strong>IMU attitude stabilization</strong>
+            <div className="pid-focus-banner">
+              <div>
+                <span className="meta-label">Workflow</span>
+                <strong>Tune position first, attitude second</strong>
+              </div>
+              <p>
+                Start by trimming X and Y drift, then settle altitude and heading, and only then
+                tighten the MPU6050-backed roll, pitch, and yaw-rate loops.
+              </p>
+            </div>
+
+            <div className="pid-loops-grid">
+              <section className="loop-section">
+                <div className="loop-head">
+                  <div>
+                    <span className="meta-label">Outer loop</span>
+                    <strong>World-frame position and heading</strong>
+                  </div>
+                  <p>The mocap target cards above tell you whether each axis is already within a stable hover band.</p>
                 </div>
-                <div className="pid-table">
-                  <div className="pid-head">Axis</div>
-                  <div className="pid-head">Kp</div>
-                  <div className="pid-head">Ki</div>
-                  <div className="pid-head">Kd</div>
-                  {ATTITUDE_PID_AXES.map((axis) => (
-                    <div className="pid-row" key={axis}>
-                      <div className="pid-axis">
-                        {axis === 'yawRate' ? 'YAW RATE' : axis.toUpperCase()}
-                      </div>
-                      {PID_TERMS.map((term) => (
-                        <input
-                          key={`${axis}-${term}`}
-                          type="number"
-                          step="0.0001"
-                          value={localControl.pid[axis][term]}
-                          onChange={(event) => updatePidValue(axis, term, event.target.value)}
-                        />
-                      ))}
-                    </div>
+                <div className="pid-card-grid">
+                  {outerLoopCards.map((card) => (
+                    <PidAxisCard
+                      key={card.axis}
+                      tone="outer"
+                      axisLabel={card.axisLabel}
+                      title={card.title}
+                      description={card.description}
+                      pid={localControl.pid[card.axis]}
+                      step={card.step}
+                      liveLabel={card.liveLabel}
+                      liveValue={card.liveValue}
+                      liveDigits={card.liveDigits}
+                      targetLabel={card.targetLabel}
+                      targetValue={card.targetValue}
+                      targetDigits={card.targetDigits}
+                      errorLabel={card.errorLabel}
+                      errorValue={card.errorValue}
+                      errorDigits={card.errorDigits}
+                      unit={card.unit}
+                      note={card.note}
+                      onChange={(term, value) => updatePidValue(card.axis, term, value)}
+                    />
                   ))}
                 </div>
-              </div>
+              </section>
+
+              <section className="loop-section">
+                <div className="loop-head">
+                  <div>
+                    <span className="meta-label">Inner loop</span>
+                    <strong>IMU attitude stabilization</strong>
+                  </div>
+                  <p>These gains are faster and smaller. Use them to clean up attitude response once the hover point is already calm.</p>
+                </div>
+                <div className="pid-card-grid">
+                  {innerLoopCards.map((card) => (
+                    <PidAxisCard
+                      key={card.axis}
+                      tone="inner"
+                      axisLabel={card.axisLabel}
+                      title={card.title}
+                      description={card.description}
+                      pid={localControl.pid[card.axis]}
+                      step={card.step}
+                      liveLabel={card.liveLabel}
+                      liveValue={card.liveValue}
+                      liveDigits={card.liveDigits}
+                      targetLabel={card.targetLabel}
+                      targetValue={card.targetValue}
+                      targetDigits={card.targetDigits}
+                      errorLabel={card.errorLabel}
+                      errorValue={card.errorValue}
+                      errorDigits={card.errorDigits}
+                      unit={card.unit}
+                      note={card.note}
+                      onChange={(term, value) => updatePidValue(card.axis, term, value)}
+                    />
+                  ))}
+                </div>
+              </section>
             </div>
           </article>
         </section>
