@@ -38,21 +38,24 @@ The UI connects to `ws://localhost:8765` and owns all operator input:
 
 - serial port selection
 - baud rate
-- PID parameters for `x`, `y`, `z`, and `yaw`
-- activation and deactivation of serial transmission
+- stream activation and motor arming
+- target `x`, `y`, `z`, and `yaw` hover coordinates
+- outer-loop PID parameters for `x`, `y`, `z`, and `yaw`
+- inner-loop PID parameters for `roll`, `pitch`, and `yaw rate`
+- hover throttle and attitude limits
 
 ## ESP32 boards
 
 Flash `esp32-s3-sender/esp32-s3-sender.ino` to the ESP32-S3. It listens for `droneIndex + JSON + newline` frames from the Python server over USB serial, strips the leading index byte, and forwards the JSON body to the matching ESP32-S2 peer over ESP-NOW.
 
-Flash `esp32-s2-drone/esp32-s2-drone.ino` to the ESP32-S2. It receives ESP-NOW messages and prints each payload to its USB serial monitor.
+Flash `esp32-s2-drone/esp32-s2-drone.ino` to the ESP32-S2. It receives ESP-NOW messages, estimates attitude from the onboard MPU6050, and runs a hover-oriented control loop for the brushed motor outputs.
 
 Setup notes:
 
 - Open the ESP32-S2 serial monitor once after flashing and note the printed station MAC address.
 - Copy that MAC address into `DRONE_MAC_ADDRESSES` in `esp32-s3-sender/esp32-s3-sender.ino`.
 - Index `0` in `DRONE_MAC_ADDRESSES` currently matches the backend's default `droneIndex` value.
-- ESP-NOW payloads in this implementation are limited to 239 characters plus the null terminator.
+- ESP-NOW payloads in this implementation are capped at the official 250-byte ESP-NOW limit.
 
 ## Run flow
 

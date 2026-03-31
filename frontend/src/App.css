@@ -156,7 +156,10 @@
 .form-grid,
 .metric-grid,
 .system-list,
-.gate-grid {
+.gate-grid,
+.field-grid,
+.control-stack,
+.pid-stack {
   display: grid;
   gap: 0.65rem;
 }
@@ -180,6 +183,14 @@
 .gate-grid {
   grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
   margin-bottom: 0.75rem;
+}
+
+.field-grid {
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+}
+
+.field-grid-compact {
+  grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
 }
 
 label,
@@ -262,6 +273,31 @@ button:hover {
 
 .action-row {
   margin-top: 0.75rem;
+}
+
+.control-stack,
+.pid-stack {
+  margin-top: 0.85rem;
+}
+
+.subsection-card {
+  display: grid;
+  gap: 0.7rem;
+  padding: 0.85rem;
+  border-radius: 16px;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  background: rgba(255, 255, 255, 0.03);
+}
+
+.subsection-head {
+  display: flex;
+  justify-content: space-between;
+  gap: 0.75rem;
+  align-items: baseline;
+}
+
+.subsection-head strong {
+  font-size: 0.98rem;
 }
 
 .hint {

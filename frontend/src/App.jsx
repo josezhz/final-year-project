@@ -15,16 +15,40 @@ const EMPTY_TELEMETRY = {
   spatial_data_valid: false,
 };
 
+const POSITION_PID_AXES = ['x', 'y', 'z', 'yaw'];
+const ATTITUDE_PID_AXES = ['roll', 'pitch', 'yawRate'];
+const PID_TERMS = ['kp', 'ki', 'kd'];
+const DEFAULT_PID = {
+  x: { kp: 6, ki: 0, kd: 2.2 },
+  y: { kp: 6, ki: 0, kd: 2.2 },
+  z: { kp: 0.9, ki: 0.35, kd: 0.18 },
+  yaw: { kp: 4.5, ki: 0, kd: 0.12 },
+  roll: { kp: 0.022, ki: 0, kd: 0.0014 },
+  pitch: { kp: 0.022, ki: 0, kd: 0.0014 },
+  yawRate: { kp: 0.006, ki: 0, kd: 0 },
+};
+const DEFAULT_TARGET = {
+  x: 0,
+  y: 0,
+  z: 0.35,
+  yaw: 0,
+};
+const DEFAULT_LIMITS = {
+  hoverThrottle: 0.36,
+  minThrottle: 0.18,
+  maxThrottle: 0.82,
+  maxTiltDeg: 12,
+  maxYawRateDeg: 120,
+};
+
 const EMPTY_CONTROL = {
   active: false,
+  armed: false,
   serialPort: '',
-  baudRate: 115200,
-  pid: {
-    x: { kp: 0, ki: 0, kd: 0 },
-    y: { kp: 0, ki: 0, kd: 0 },
-    z: { kp: 0, ki: 0, kd: 0 },
-    yaw: { kp: 0, ki: 0, kd: 0 },
-  },
+  baudRate: 1000000,
+  target: DEFAULT_TARGET,
+  limits: DEFAULT_LIMITS,
+  pid: DEFAULT_PID,
 };
 
 const EMPTY_SYSTEM = {
@@ -574,6 +598,16 @@ function App() {
     }));
   };
 
+  const updateNestedControlField = (section, field, value) => {
+    setLocalControl((current) => ({
+      ...current,
+      [section]: {
+        ...current[section],
+        [field]: Number(value),
+      },
+    }));
+  };
+
   const updateControlField = (field, value) => {
     setLocalControl((current) => ({
       ...current,
@@ -589,17 +623,39 @@ function App() {
   };
 
   const toggleActivation = () => {
+    const nextActive = !localControl.active;
     const nextControl = {
       ...localControl,
-      active: !localControl.active,
+      active: nextActive,
+      armed: nextActive ? localControl.armed : false,
     };
     setLocalControl(nextControl);
     applyControl(nextControl);
   };
 
+  const toggleArm = () => {
+    const nextControl = {
+      ...localControl,
+      active: localControl.active || !localControl.armed,
+      armed: !localControl.armed,
+    };
+    setLocalControl(nextControl);
+    applyControl(nextControl);
+  };
+
+  const captureCurrentPoseAsTarget = () => {
+    setLocalControl((current) => ({
+      ...current,
+      target: {
+        x: Number(telemetry.position?.x ?? 0),
+        y: Number(telemetry.position?.y ?? 0),
+        z: Number(telemetry.position?.z ?? 0),
+        yaw: Number(telemetry.rotation?.yaw ?? 0),
+      },
+    }));
+  };
+
   const isDirty = JSON.stringify(localControl) !== JSON.stringify(serverControl);
-  const pidAxes = ['x', 'y', 'z', 'yaw'];
-  const pidTerms = ['kp', 'ki', 'kd'];
   const gateCards = [
     {
       label: 'Frontend link',
@@ -622,14 +678,28 @@ function App() {
       detail: `${system.connectedCameras}/${system.expectedCameras} cameras`,
     },
     {
+      label: 'Command stream',
+      value: serverControl.active ? 'Active' : 'Idle',
+      tone: serverControl.active ? 'ready' : 'blocked',
+      detail: serverControl.active ? 'Backend is forwarding control frames' : 'Enable stream from the frontend',
+    },
+    {
+      label: 'Arm state',
+      value: serverControl.armed ? 'Armed' : 'Disarmed',
+      tone: serverControl.armed ? 'pending' : 'blocked',
+      detail: serverControl.armed
+        ? 'Motors may spin when tracking stays valid'
+        : 'Safe output state',
+    },
+    {
       label: 'ESP send path',
-      value: system.serialForwarding ? 'Live' : system.canSendToEsp32 ? 'Armed' : 'Blocked',
+      value: system.serialForwarding ? 'Live' : system.canSendToEsp32 ? 'Ready' : 'Blocked',
       tone: system.serialForwarding ? 'ready' : system.canSendToEsp32 ? 'pending' : 'blocked',
       detail: system.serialForwarding
         ? 'Serial writes are succeeding'
         : system.canSendToEsp32
           ? system.lastSerialSendError || 'Waiting for first successful serial frame'
-          : 'Needs serial + activation',
+          : 'Needs serial + stream',
     },
   ];
 
@@ -644,9 +714,9 @@ function App() {
             <p className="eyebrow">Python server to ESP32-S3 bridge</p>
             <h1>Motion capture control desk</h1>
             <p className="hero-copy">
-              Connect the sender first, confirm the backend gates, then watch tracking and
-              outgoing payloads in one place. When pose data is unavailable, the server still
-              emits an explicit invalid-data payload for the ESP path.
+              Drive the hover stack from one place: tune outer and inner PID loops, set the
+              mocap target pose, arm from the frontend, and watch the exact compact payload
+              heading to the ESP32-S3 relay.
             </p>
           </div>
 
@@ -663,7 +733,7 @@ function App() {
                 system.serialForwarding ? 'ready' : system.canSendToEsp32 ? 'pending' : 'blocked'
               }`}
             >
-              {system.serialForwarding ? 'Sending live' : system.canSendToEsp32 ? 'Send armed' : 'Send blocked'}
+              {system.serialForwarding ? 'Sending live' : system.canSendToEsp32 ? 'Link ready' : 'Send blocked'}
             </span>
           </div>
         </section>
@@ -673,7 +743,7 @@ function App() {
             <div className="panel-heading">
               <div>
                 <p className="panel-label">Control</p>
-                <h2>Activation and serial</h2>
+                <h2>Stream, arm, and setpoints</h2>
               </div>
               <button className="ghost-button" onClick={() => sendMessage({ type: 'refresh_serial_ports' })}>
                 Refresh ports
@@ -710,16 +780,131 @@ function App() {
 
             <div className="action-row">
               <button className="primary-button" onClick={() => applyControl()}>
-                Apply settings
+                Apply control
               </button>
               <button className={`toggle-button ${localControl.active ? 'active' : ''}`} onClick={toggleActivation}>
-                {localControl.active ? 'Deactivate stream' : 'Activate stream'}
+                {localControl.active ? 'Stop stream' : 'Start stream'}
+              </button>
+              <button className={`toggle-button ${localControl.armed ? 'active' : ''}`} onClick={toggleArm}>
+                {localControl.armed ? 'Disarm motors' : 'Arm motors'}
+              </button>
+              <button className="ghost-button" onClick={captureCurrentPoseAsTarget}>
+                Use current pose
               </button>
             </div>
 
+            <div className="control-stack">
+              <div className="subsection-card">
+                <div className="subsection-head">
+                  <span className="meta-label">Target pose</span>
+                  <strong>Hover reference</strong>
+                </div>
+                <div className="field-grid field-grid-compact">
+                  <label>
+                    <span>Target X</span>
+                    <input
+                      type="number"
+                      step="0.01"
+                      value={localControl.target.x}
+                      onChange={(event) => updateNestedControlField('target', 'x', event.target.value)}
+                    />
+                  </label>
+                  <label>
+                    <span>Target Y</span>
+                    <input
+                      type="number"
+                      step="0.01"
+                      value={localControl.target.y}
+                      onChange={(event) => updateNestedControlField('target', 'y', event.target.value)}
+                    />
+                  </label>
+                  <label>
+                    <span>Target Z</span>
+                    <input
+                      type="number"
+                      step="0.01"
+                      value={localControl.target.z}
+                      onChange={(event) => updateNestedControlField('target', 'z', event.target.value)}
+                    />
+                  </label>
+                  <label>
+                    <span>Target Yaw</span>
+                    <input
+                      type="number"
+                      step="1"
+                      value={localControl.target.yaw}
+                      onChange={(event) => updateNestedControlField('target', 'yaw', event.target.value)}
+                    />
+                  </label>
+                </div>
+              </div>
+
+              <div className="subsection-card">
+                <div className="subsection-head">
+                  <span className="meta-label">Hover limits</span>
+                  <strong>Throttle and attitude bounds</strong>
+                </div>
+                <div className="field-grid">
+                  <label>
+                    <span>Hover throttle</span>
+                    <input
+                      type="number"
+                      step="0.01"
+                      min="0"
+                      max="1"
+                      value={localControl.limits.hoverThrottle}
+                      onChange={(event) => updateNestedControlField('limits', 'hoverThrottle', event.target.value)}
+                    />
+                  </label>
+                  <label>
+                    <span>Min throttle</span>
+                    <input
+                      type="number"
+                      step="0.01"
+                      min="0"
+                      max="1"
+                      value={localControl.limits.minThrottle}
+                      onChange={(event) => updateNestedControlField('limits', 'minThrottle', event.target.value)}
+                    />
+                  </label>
+                  <label>
+                    <span>Max throttle</span>
+                    <input
+                      type="number"
+                      step="0.01"
+                      min="0"
+                      max="1"
+                      value={localControl.limits.maxThrottle}
+                      onChange={(event) => updateNestedControlField('limits', 'maxThrottle', event.target.value)}
+                    />
+                  </label>
+                  <label>
+                    <span>Max tilt (deg)</span>
+                    <input
+                      type="number"
+                      step="0.5"
+                      min="1"
+                      value={localControl.limits.maxTiltDeg}
+                      onChange={(event) => updateNestedControlField('limits', 'maxTiltDeg', event.target.value)}
+                    />
+                  </label>
+                  <label>
+                    <span>Max yaw rate (deg/s)</span>
+                    <input
+                      type="number"
+                      step="1"
+                      min="1"
+                      value={localControl.limits.maxYawRateDeg}
+                      onChange={(event) => updateNestedControlField('limits', 'maxYawRateDeg', event.target.value)}
+                    />
+                  </label>
+                </div>
+              </div>
+            </div>
+
             <p className="hint">
-              Activation is controlled from the frontend only. Once active, the backend
-              streams continuously while the serial link is open, including explicit invalid-data frames.
+              The stream switch feeds the ESP32-S3 relay, while the arm switch is the actual
+              motor-enable intent. Capture the current mocap pose as the hover target before arming.
             </p>
           </article>
 
@@ -915,33 +1100,70 @@ function App() {
           <article className="panel panel-pid">
             <div className="panel-heading">
               <div>
-                <p className="panel-label">PID</p>
-                <h2>Controller parameters</h2>
+                <p className="panel-label">Hover tuning</p>
+                <h2>Outer and inner PID loops</h2>
               </div>
               <span className={`mini-badge ${isDirty ? 'dirty' : 'clean'}`}>
                 {isDirty ? 'Unsaved changes' : 'Synced'}
               </span>
             </div>
 
-            <div className="pid-table">
-              <div className="pid-head">Axis</div>
-              <div className="pid-head">Kp</div>
-              <div className="pid-head">Ki</div>
-              <div className="pid-head">Kd</div>
-              {pidAxes.map((axis) => (
-                <div className="pid-row" key={axis}>
-                  <div className="pid-axis">{axis.toUpperCase()}</div>
-                  {pidTerms.map((term) => (
-                    <input
-                      key={`${axis}-${term}`}
-                      type="number"
-                      step="0.01"
-                      value={localControl.pid[axis][term]}
-                      onChange={(event) => updatePidValue(axis, term, event.target.value)}
-                    />
+            <div className="pid-stack">
+              <div className="subsection-card">
+                <div className="subsection-head">
+                  <span className="meta-label">Outer loop</span>
+                  <strong>World-frame position and yaw</strong>
+                </div>
+                <div className="pid-table">
+                  <div className="pid-head">Axis</div>
+                  <div className="pid-head">Kp</div>
+                  <div className="pid-head">Ki</div>
+                  <div className="pid-head">Kd</div>
+                  {POSITION_PID_AXES.map((axis) => (
+                    <div className="pid-row" key={axis}>
+                      <div className="pid-axis">{axis.toUpperCase()}</div>
+                      {PID_TERMS.map((term) => (
+                        <input
+                          key={`${axis}-${term}`}
+                          type="number"
+                          step="0.01"
+                          value={localControl.pid[axis][term]}
+                          onChange={(event) => updatePidValue(axis, term, event.target.value)}
+                        />
+                      ))}
+                    </div>
                   ))}
                 </div>
-              ))}
+              </div>
+
+              <div className="subsection-card">
+                <div className="subsection-head">
+                  <span className="meta-label">Inner loop</span>
+                  <strong>IMU attitude stabilization</strong>
+                </div>
+                <div className="pid-table">
+                  <div className="pid-head">Axis</div>
+                  <div className="pid-head">Kp</div>
+                  <div className="pid-head">Ki</div>
+                  <div className="pid-head">Kd</div>
+                  {ATTITUDE_PID_AXES.map((axis) => (
+                    <div className="pid-row" key={axis}>
+                      <div className="pid-axis">
+                        {axis === 'yawRate' ? 'YAW RATE' : axis.toUpperCase()}
+                      </div>
+                      {PID_TERMS.map((term) => (
+                        <input
+                          key={`${axis}-${term}`}
+                          type="number"
+                          step="0.0001"
+                          value={localControl.pid[axis][term]}
+                          onChange={(event) => updatePidValue(axis, term, event.target.value)}
+                        />
+                      ))}
+                    </div>
+                  ))}
+                </div>
+              </div>
             </div>
           </article>
         </section>

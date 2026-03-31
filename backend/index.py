@@ -50,6 +50,25 @@ DEFAULT_BAUD_RATE = 1000000
 DEFAULT_DRONE_INDEX = 0
 POSITION_JUMP_WEIGHT = 2.0
 PREVIEW_HZ = 5
+MAX_ESP_NOW_PAYLOAD_BYTES = 250
+
+CONTROL_PID_DEFAULTS = {
+    "x": {"kp": 6.0, "ki": 0.0, "kd": 2.2},
+    "y": {"kp": 6.0, "ki": 0.0, "kd": 2.2},
+    "z": {"kp": 0.9, "ki": 0.35, "kd": 0.18},
+    "yaw": {"kp": 4.5, "ki": 0.0, "kd": 0.12},
+    "roll": {"kp": 0.022, "ki": 0.0, "kd": 0.0014},
+    "pitch": {"kp": 0.022, "ki": 0.0, "kd": 0.0014},
+    "yawRate": {"kp": 0.006, "ki": 0.0, "kd": 0.0},
+}
+CONTROL_TARGET_DEFAULTS = {"x": 0.0, "y": 0.0, "z": 0.35, "yaw": 0.0}
+CONTROL_LIMIT_DEFAULTS = {
+    "hoverThrottle": 0.36,
+    "minThrottle": 0.18,
+    "maxThrottle": 0.82,
+    "maxTiltDeg": 12.0,
+    "maxYawRateDeg": 120.0,
+}
 
 
 DRONE_LED_MODEL = np.array(
@@ -76,6 +95,92 @@ PREVIEW_WIDTH = 240
 PREVIEW_JPEG_QUALITY = 45
 MAX_LED_REORDER_COST_PIXELS = 30.0
 MAPPING_TEMPORAL_WEIGHT = 120.0
+
+
+def default_pid_config():
+    return {
+        axis: {term: float(value) for term, value in terms.items()}
+        for axis, terms in CONTROL_PID_DEFAULTS.items()
+    }
+
+
+def default_target_config():
+    return {axis: float(value) for axis, value in CONTROL_TARGET_DEFAULTS.items()}
+
+
+def default_limit_config():
+    return {axis: float(value) for axis, value in CONTROL_LIMIT_DEFAULTS.items()}
+
+
+def coerce_float(value, default=0.0):
+    try:
+        if value is None:
+            raise ValueError
+        return float(value)
+    except (TypeError, ValueError):
+        return float(default)
+
+
+def sanitize_pid_config(payload):
+    payload = payload if isinstance(payload, dict) else {}
+    sanitized = default_pid_config()
+    for axis, defaults in CONTROL_PID_DEFAULTS.items():
+        axis_payload = payload.get(axis, {})
+        if not isinstance(axis_payload, dict):
+            axis_payload = {}
+        sanitized[axis] = {
+            term: coerce_float(axis_payload.get(term), default)
+            for term, default in defaults.items()
+        }
+    return sanitized
+
+
+def sanitize_target_config(payload):
+    payload = payload if isinstance(payload, dict) else {}
+    return {
+        axis: coerce_float(payload.get(axis), default)
+        for axis, default in CONTROL_TARGET_DEFAULTS.items()
+    }
+
+
+def sanitize_limit_config(payload):
+    payload = payload if isinstance(payload, dict) else {}
+    sanitized = {
+        axis: coerce_float(payload.get(axis), default)
+        for axis, default in CONTROL_LIMIT_DEFAULTS.items()
+    }
+    sanitized["minThrottle"] = max(0.0, min(sanitized["minThrottle"], 1.0))
+    sanitized["hoverThrottle"] = max(
+        sanitized["minThrottle"],
+        min(sanitized["hoverThrottle"], 1.0),
+    )
+    sanitized["maxThrottle"] = max(
+        sanitized["hoverThrottle"],
+        min(sanitized["maxThrottle"], 1.0),
+    )
+    sanitized["maxTiltDeg"] = max(1.0, sanitized["maxTiltDeg"])
+    sanitized["maxYawRateDeg"] = max(1.0, sanitized["maxYawRateDeg"])
+    return sanitized
+
+
+def compact_numeric(value, digits=4):
+    return round(float(value), digits)
+
+
+def compact_pid_triplet(pid_values):
+    return [
+        compact_numeric(pid_values["kp"], 4),
+        compact_numeric(pid_values["ki"], 4),
+        compact_numeric(pid_values["kd"], 4),
+    ]
+
+
+def compact_pid_bundle(pid_config):
+    ordered_axes = ("x", "y", "z", "yaw", "roll", "pitch", "yawRate")
+    values = []
+    for axis in ordered_axes:
+        values.extend(compact_pid_triplet(pid_config[axis]))
+    return values
 
 
 def encode_preview_frame(frame, leds=None, labels=None):
@@ -491,16 +596,12 @@ def solve_pose(
 @dataclass
 class ControlState:
     active: bool = False
+    armed: bool = False
     serial_port: str = ""
     baud_rate: int = DEFAULT_BAUD_RATE
-    pid: dict = field(
-        default_factory=lambda: {
-            "x": {"kp": 0.0, "ki": 0.0, "kd": 0.0},
-            "y": {"kp": 0.0, "ki": 0.0, "kd": 0.0},
-            "z": {"kp": 0.0, "ki": 0.0, "kd": 0.0},
-            "yaw": {"kp": 0.0, "ki": 0.0, "kd": 0.0},
-        }
-    )
+    target: dict = field(default_factory=default_target_config)
+    limits: dict = field(default_factory=default_limit_config)
+    pid: dict = field(default_factory=default_pid_config)
 
 
 class SerialBridge:
@@ -622,9 +723,22 @@ class SerialBridge:
 
         try:
             self.drain_input()
+            serialized_payload = json.dumps(
+                payload,
+                separators=(",", ":"),
+                allow_nan=False,
+            )
+            encoded_payload = serialized_payload.encode("utf-8")
+            if len(encoded_payload) > MAX_ESP_NOW_PAYLOAD_BYTES:
+                raise ValueError(
+                    f"Payload exceeds ESP-NOW limit ({len(encoded_payload)}/{MAX_ESP_NOW_PAYLOAD_BYTES} bytes)."
+                )
+
             frame = (
-                f"{int(drone_index)}{json.dumps(payload, separators=(',', ':'))}"
-            ).encode("utf-8") + SERIAL_FRAME_TERMINATOR
+                str(int(drone_index)).encode("utf-8")
+                + encoded_payload
+                + SERIAL_FRAME_TERMINATOR
+            )
             written = self.connection.write(frame)
             if written != len(frame):
                 raise IOError(
@@ -972,27 +1086,39 @@ class ControlServer:
     def build_serial_payload(self):
         spatial_data_valid = self.telemetry["spatial_data_valid"]
         drone_index = DEFAULT_DRONE_INDEX
+        position = self.telemetry.get("position", {})
+        rotation = self.telemetry.get("rotation", {})
+        # Keep keys short so the full controller frame stays comfortably within
+        # the ESP-NOW payload limit even with non-zero pose and tuning values.
         serial_payload = {
-            "droneIndex": drone_index,
-            "v": 1,
-            "t": round(time.time(), 3),
-            "a": self.control.active,
-            "ok": spatial_data_valid,
+            "v": 2,
+            "a": int(self.control.armed),
+            "o": int(spatial_data_valid),
+            "p": [
+                compact_numeric(position.get("x", 0.0), 4),
+                compact_numeric(position.get("y", 0.0), 4),
+                compact_numeric(position.get("z", 0.0), 4),
+            ],
+            "r": [
+                compact_numeric(rotation.get("yaw", 0.0), 2),
+                compact_numeric(rotation.get("pitch", 0.0), 2),
+                compact_numeric(rotation.get("roll", 0.0), 2),
+            ],
+            "g": [
+                compact_numeric(self.control.target["x"], 4),
+                compact_numeric(self.control.target["y"], 4),
+                compact_numeric(self.control.target["z"], 4),
+                compact_numeric(self.control.target["yaw"], 2),
+            ],
+            "u": compact_pid_bundle(self.control.pid),
+            "m": [
+                compact_numeric(self.control.limits["hoverThrottle"], 3),
+                compact_numeric(self.control.limits["minThrottle"], 3),
+                compact_numeric(self.control.limits["maxThrottle"], 3),
+                compact_numeric(self.control.limits["maxTiltDeg"], 1),
+                compact_numeric(self.control.limits["maxYawRateDeg"], 1),
+            ],
         }
-        if spatial_data_valid:
-            serial_payload["p"] = [
-                self.telemetry["position"]["x"],
-                self.telemetry["position"]["y"],
-                self.telemetry["position"]["z"],
-            ]
-            serial_payload["r"] = [
-                self.telemetry["rotation"]["yaw"],
-                self.telemetry["rotation"]["pitch"],
-                self.telemetry["rotation"]["roll"],
-            ]
-            serial_payload["e"] = self.telemetry["error"]
-        else:
-            serial_payload["m"] = "no data"
         return drone_index, serial_payload
 
     def build_snapshot(self):
@@ -1007,8 +1133,11 @@ class ControlServer:
             "type": "state",
             "control": {
                 "active": self.control.active,
+                "armed": self.control.armed,
                 "serialPort": self.control.serial_port,
                 "baudRate": self.control.baud_rate,
+                "target": self.control.target,
+                "limits": self.control.limits,
                 "pid": self.control.pid,
             },
             "telemetry": self.telemetry,
@@ -1056,9 +1185,12 @@ class ControlServer:
             async with self.state_lock:
                 if message_type == "set_control":
                     control_payload = payload.get("control", {})
+                    if not isinstance(control_payload, dict):
+                        control_payload = {}
                     previous_port = self.control.serial_port
                     previous_baud_rate = self.control.baud_rate
                     self.control.active = bool(control_payload.get("active", self.control.active))
+                    self.control.armed = bool(control_payload.get("armed", self.control.armed))
                     self.control.serial_port = str(
                         control_payload.get("serialPort", self.control.serial_port)
                     ).strip()
@@ -1066,7 +1198,13 @@ class ControlServer:
                         control_payload.get("baudRate", self.control.baud_rate)
                     )
                     if "pid" in control_payload:
-                        self.control.pid = control_payload["pid"]
+                        self.control.pid = sanitize_pid_config(control_payload["pid"])
+                    if "target" in control_payload:
+                        self.control.target = sanitize_target_config(control_payload["target"])
+                    if "limits" in control_payload:
+                        self.control.limits = sanitize_limit_config(control_payload["limits"])
+                    if not self.control.active:
+                        self.control.armed = False
 
                     serial_settings_changed = (
                         self.control.serial_port != previous_port

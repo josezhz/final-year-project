@@ -2,7 +2,7 @@
 #include <esp_now.h>
 
 constexpr unsigned long USB_BAUD_RATE = 1000000;
-constexpr size_t MAX_JSON_PAYLOAD_LENGTH = 239;
+constexpr size_t MAX_JSON_PAYLOAD_LENGTH = 250;
 constexpr size_t MAX_SERIAL_FRAME_LENGTH = MAX_JSON_PAYLOAD_LENGTH + 1;
 constexpr unsigned long SERIAL_WAIT_MS = 2000;
 
@@ -59,6 +59,15 @@ bool initEspNowPeer() {
 }
 
 void sendLineOverEspNow(const String &line) {
+  if (line.length() > MAX_JSON_PAYLOAD_LENGTH) {
+    Serial.print("Dropping oversized JSON payload: ");
+    Serial.print(line.length());
+    Serial.print(" bytes (limit ");
+    Serial.print(MAX_JSON_PAYLOAD_LENGTH);
+    Serial.println(").");
+    return;
+  }
+
   EspNowMessage message = {};
   const size_t copyLength = min(line.length(), MAX_JSON_PAYLOAD_LENGTH);
   line.substring(0, copyLength).toCharArray(message.payload, sizeof(message.payload));
@@ -66,7 +75,7 @@ void sendLineOverEspNow(const String &line) {
   const esp_err_t result = esp_now_send(
     DRONE_MAC_ADDRESS,
     reinterpret_cast<const uint8_t *>(&message),
-    sizeof(message)
+    copyLength
   );
   (void)result;
 }
