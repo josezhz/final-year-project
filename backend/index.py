@@ -61,6 +61,8 @@ CONTROL_PID_DEFAULTS = {
     "pitch": {"kp": 0.022, "ki": 0.0, "kd": 0.0014},
     "yawRate": {"kp": 0.006, "ki": 0.0, "kd": 0.0},
 }
+# Mocap/body frame is +x front, +y left, +z up. A yaw target of 0 deg means
+# the drone's nose should stay aligned with the world +x direction.
 CONTROL_TARGET_DEFAULTS = {"x": 0.0, "y": 0.0, "z": 0.35, "yaw": 0.0}
 CONTROL_LIMIT_DEFAULTS = {
     "hoverThrottle": 0.36,
@@ -71,6 +73,7 @@ CONTROL_LIMIT_DEFAULTS = {
 }
 
 
+# Body model uses the same mocap frame: +x front, +y left, +z up.
 DRONE_LED_MODEL = np.array(
     [
         [0.050, 0.000, 0.025],   # Front

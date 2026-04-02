@@ -36,7 +36,8 @@ constexpr float COMPLEMENTARY_ALPHA = 0.98f;
 // M1 = front-right, M2 = back-right, M3 = back-left, M4 = front-left.
 // If yaw response is inverted during bench testing, flip MOTOR_YAW_SIGN.
 constexpr float MOTOR_ROLL_SIGN[MOTOR_COUNT] = {-1.0f, -1.0f, 1.0f, 1.0f};
-constexpr float MOTOR_PITCH_SIGN[MOTOR_COUNT] = {-1.0f, 1.0f, 1.0f, -1.0f};
+// Positive pitch correction means nose up, so front motors rise and rear motors fall.
+constexpr float MOTOR_PITCH_SIGN[MOTOR_COUNT] = {1.0f, -1.0f, -1.0f, 1.0f};
 constexpr float MOTOR_YAW_SIGN[MOTOR_COUNT] = {-1.0f, 1.0f, -1.0f, 1.0f};
 
 struct EspNowMessage {
@@ -142,7 +143,7 @@ FlightCommand makeDefaultFlightCommand() {
   command.target[0] = 0.0f;
   command.target[1] = 0.0f;
   command.target[2] = 0.35f;
-  command.target[3] = 0.0f;
+  command.target[3] = 0.0f;  // Hold the nose on the mocap world +X axis by default.
   command.posX = makePidGains(6.0f, 0.0f, 2.2f);
   command.posY = makePidGains(6.0f, 0.0f, 2.2f);
   command.posZ = makePidGains(0.9f, 0.35f, 0.18f);
@@ -623,8 +624,11 @@ void runHoverController(float dtSeconds) {
   );
 
   const float yawRad = flightCommand.rotation[0] * DEG_TO_RAD_F;
+  // Mocap pose uses +X forward, +Y left, +Z up. The IMU/mixer uses
+  // +forward and +right, so the lateral body-right command must negate
+  // the mocap Y axis while rotating the world-frame demand into body frame.
   const float forwardCommand = (cosf(yawRad) * worldXCommand) + (sinf(yawRad) * worldYCommand);
-  const float rightCommand = (-sinf(yawRad) * worldXCommand) + (cosf(yawRad) * worldYCommand);
+  const float rightCommand = (sinf(yawRad) * worldXCommand) - (cosf(yawRad) * worldYCommand);
 
   const float desiredPitchDeg = clampf(-forwardCommand, -flightCommand.maxTiltDeg, flightCommand.maxTiltDeg);
   const float desiredRollDeg = clampf(rightCommand, -flightCommand.maxTiltDeg, flightCommand.maxTiltDeg);
