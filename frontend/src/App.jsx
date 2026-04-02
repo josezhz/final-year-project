@@ -68,6 +68,10 @@ const EMPTY_SYSTEM = {
   lastSerialSendError: '',
   lastSerialAttemptPayload: null,
   lastSerialPayload: null,
+  imuLevelCalibrationPending: false,
+  imuLevelCalibrationSent: false,
+  imuLevelCalibrationSequence: 0,
+  imuLevelCalibrationStatus: '',
 };
 
 const TRAJECTORY_WINDOW_MS = 3000;
@@ -783,6 +787,10 @@ function App() {
     }));
   };
 
+  const requestImuLevelCalibration = () => {
+    sendMessage({ type: 'calibrate_imu_level' });
+  };
+
   const isDirty = JSON.stringify(localControl) !== JSON.stringify(serverControl);
   const livePosition = {
     x: Number(telemetry.position?.x ?? 0),
@@ -800,6 +808,38 @@ function App() {
     z: Number(localControl.target.z ?? 0) - livePosition.z,
     yaw: wrapAngleDegrees(Number(localControl.target.yaw ?? 0) - liveRotation.yaw),
   };
+  const canRequestImuLevelCalibration = (
+    connectionState === 'Connected'
+    && Boolean(serverControl.serialPort)
+    && !serverControl.armed
+    && !localControl.armed
+  );
+  let imuLevelCalibrationTone = 'pending';
+  let imuLevelCalibrationLabel = 'Ready';
+  if (serverControl.armed || localControl.armed) {
+    imuLevelCalibrationTone = 'blocked';
+    imuLevelCalibrationLabel = 'Disarm first';
+  } else if (connectionState !== 'Connected') {
+    imuLevelCalibrationTone = 'blocked';
+    imuLevelCalibrationLabel = 'Frontend offline';
+  } else if (!serverControl.serialPort) {
+    imuLevelCalibrationTone = 'blocked';
+    imuLevelCalibrationLabel = 'Pick serial port';
+  } else if (system.imuLevelCalibrationPending && system.imuLevelCalibrationSent) {
+    imuLevelCalibrationTone = 'pending';
+    imuLevelCalibrationLabel = 'Retrying';
+  } else if (system.imuLevelCalibrationPending) {
+    imuLevelCalibrationTone = 'pending';
+    imuLevelCalibrationLabel = 'Sending';
+  } else if (system.imuLevelCalibrationSent) {
+    imuLevelCalibrationTone = 'ready';
+    imuLevelCalibrationLabel = 'Request sent';
+  }
+  const imuLevelCalibrationStatus = system.imuLevelCalibrationStatus || (
+    serverControl.serialPort
+      ? 'No IMU level calibration has been sent yet this session.'
+      : 'Apply a serial port selection before sending the IMU level request.'
+  );
   const gateCards = [
     {
       label: 'Frontend link',
@@ -1199,6 +1239,28 @@ function App() {
                     />
                   </label>
                 </div>
+              </div>
+
+              <div className="subsection-card">
+                <div className="subsection-head">
+                  <span className="meta-label">IMU level trim</span>
+                  <strong>Set horizontal zero</strong>
+                </div>
+                <p className="axis-copy">
+                  Place the drone on a flat surface with the motors disarmed, then capture the
+                  current attitude as roll and pitch zero on the ESP32-S2.
+                </p>
+                <div className="action-row">
+                  <button
+                    className="ghost-button"
+                    onClick={requestImuLevelCalibration}
+                    disabled={!canRequestImuLevelCalibration}
+                  >
+                    Calibrate IMU level
+                  </button>
+                  <span className={`pill ${imuLevelCalibrationTone}`}>{imuLevelCalibrationLabel}</span>
+                </div>
+                <p className="hint">{imuLevelCalibrationStatus}</p>
               </div>
             </div>
 

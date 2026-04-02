@@ -39,7 +39,7 @@ EXPECTED_CAMERAS = 2
 MIN_BRIGHTNESS = 50
 MAX_LEDS = 3
 MAX_FIT_ERROR = 0.05
-TRACKING_HZ = 30
+TRACKING_HZ = 60
 SERIAL_REFRESH_SECONDS = 1.0
 SERIAL_RECONNECT_SECONDS = 1.0
 SERIAL_SETTLE_SECONDS = 2.0
@@ -51,6 +51,7 @@ DEFAULT_DRONE_INDEX = 0
 POSITION_JUMP_WEIGHT = 2.0
 PREVIEW_HZ = 5
 MAX_ESP_NOW_PAYLOAD_BYTES = 250
+IMU_LEVEL_CALIBRATION_RETRY_SECONDS = 1.0
 
 CONTROL_PID_DEFAULTS = {
     "x": {"kp": 6.0, "ki": 0.0, "kd": 2.2},
@@ -1084,7 +1085,41 @@ class ControlServer:
         self.last_serial_attempt_payload = None
         self.last_serial_send_ok = False
         self.last_serial_send_error = ""
+        self.imu_level_calibration_sequence = 0
+        self.imu_level_calibration_requested_at = 0.0
+        self.imu_level_calibration_sent = False
+        self.imu_level_calibration_status = ""
         self.state_lock = asyncio.Lock()
+
+    def is_imu_level_calibration_pending(self):
+        if self.imu_level_calibration_sequence <= 0:
+            return False
+        return (
+            time.time() - self.imu_level_calibration_requested_at
+        ) < IMU_LEVEL_CALIBRATION_RETRY_SECONDS
+
+    def queue_imu_level_calibration(self):
+        if self.control.armed:
+            self.imu_level_calibration_sent = False
+            self.imu_level_calibration_status = (
+                "Disarm motors before calibrating the IMU level."
+            )
+            return False
+
+        if not self.control.serial_port:
+            self.imu_level_calibration_sent = False
+            self.imu_level_calibration_status = (
+                "Select a serial port before calibrating the IMU level."
+            )
+            return False
+
+        self.imu_level_calibration_sequence += 1
+        self.imu_level_calibration_requested_at = time.time()
+        self.imu_level_calibration_sent = False
+        self.imu_level_calibration_status = (
+            "Queued. Hold the drone level and still."
+        )
+        return True
 
     def build_serial_payload(self):
         spatial_data_valid = self.telemetry["spatial_data_valid"]
@@ -1122,6 +1157,8 @@ class ControlServer:
                 compact_numeric(self.control.limits["maxYawRateDeg"], 1),
             ],
         }
+        if self.is_imu_level_calibration_pending():
+            serial_payload["l"] = int(self.imu_level_calibration_sequence)
         return drone_index, serial_payload
 
     def build_snapshot(self):
@@ -1163,6 +1200,10 @@ class ControlServer:
                 "lastSerialSendError": self.last_serial_send_error,
                 "lastSerialAttemptPayload": self.last_serial_attempt_payload,
                 "lastSerialPayload": self.last_serial_payload,
+                "imuLevelCalibrationPending": self.is_imu_level_calibration_pending(),
+                "imuLevelCalibrationSent": self.imu_level_calibration_sent,
+                "imuLevelCalibrationSequence": self.imu_level_calibration_sequence,
+                "imuLevelCalibrationStatus": self.imu_level_calibration_status,
             },
         }
 
@@ -1220,6 +1261,8 @@ class ControlServer:
                         self.serial_bridge.connect(self.control.serial_port, self.control.baud_rate)
                 elif message_type == "refresh_serial_ports":
                     self.serial_bridge.refresh_ports(force=True)
+                elif message_type == "calibrate_imu_level":
+                    self.queue_imu_level_calibration()
         except Exception as exc:
             self.serial_bridge.last_error = f"Control message handling failed: {exc}"
             print(f"Control message handling failed: {exc}")
@@ -1275,22 +1318,45 @@ class ControlServer:
                         self.telemetry = dict(DEFAULT_TELEMETRY)
 
                     snapshot = self.build_snapshot()
+                    imu_level_pending = self.is_imu_level_calibration_pending()
+                    should_send_serial = (
+                        snapshot["system"]["canSendToEsp32"] or imu_level_pending
+                    )
 
-                    if snapshot["system"]["canSendToEsp32"]:
+                    if should_send_serial and self.control.serial_port:
                         drone_index, serial_payload = self.build_serial_payload()
                         self.last_serial_attempt_payload = serial_payload
                         if self.serial_bridge.send(drone_index, serial_payload):
                             self.last_serial_payload = serial_payload
                             self.last_serial_send_ok = True
                             self.last_serial_send_error = ""
+                            if imu_level_pending:
+                                self.imu_level_calibration_sent = True
+                                self.imu_level_calibration_status = (
+                                    "Level request sent. Keep the drone flat and still."
+                                )
                         else:
                             self.last_serial_send_ok = False
                             self.last_serial_send_error = (
                                 self.serial_bridge.last_error or "Serial send failed."
                             )
+                            if imu_level_pending:
+                                self.imu_level_calibration_status = (
+                                    self.serial_bridge.last_error
+                                    or "Level request send failed."
+                                )
                     else:
                         self.last_serial_send_ok = False
-                        if not self.control.active:
+                        if (
+                            self.imu_level_calibration_sequence > 0
+                            and not imu_level_pending
+                            and not self.imu_level_calibration_sent
+                            and self.imu_level_calibration_status.startswith("Queued")
+                        ):
+                            self.imu_level_calibration_status = (
+                                "Level request expired before the serial link was ready."
+                            )
+                        if not self.control.active and not imu_level_pending:
                             self.last_serial_send_error = ""
                             self.last_serial_attempt_payload = None
                         elif not self.serial_bridge.is_connected():

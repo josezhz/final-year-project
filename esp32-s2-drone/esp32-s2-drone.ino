@@ -10,10 +10,16 @@ constexpr unsigned long SERIAL_WAIT_MS = 2000;
 constexpr unsigned long STATUS_PRINT_INTERVAL_MS = 1000;
 constexpr unsigned long COMMAND_TIMEOUT_MS = 250;
 constexpr unsigned long ARM_RAMP_MS = 450;
+constexpr unsigned long IMU_REINIT_RETRY_MS = 1000;
+constexpr unsigned long IMU_ERROR_LOG_INTERVAL_MS = 1000;
 
 constexpr uint8_t I2C_SDA_PIN = 11;
 constexpr uint8_t I2C_SCL_PIN = 10;
 constexpr uint8_t MPU6050_ADDRESS = 0x68;
+constexpr uint32_t I2C_FREQUENCY_HZ = 100000;
+constexpr uint16_t I2C_TIMEOUT_MS = 20;
+constexpr uint8_t I2C_TRANSACTION_RETRIES = 3;
+constexpr uint8_t IMU_FAILURES_BEFORE_REINIT = 5;
 constexpr uint8_t MOTOR_COUNT = 4;
 constexpr uint8_t MOTOR_PINS[MOTOR_COUNT] = {5, 6, 3, 4};
 constexpr int PWM_FREQUENCY_HZ = 20000;
@@ -74,15 +80,20 @@ struct FlightCommand {
   float maxThrottle;
   float maxTiltDeg;
   float maxYawRateDeg;
+  uint32_t levelCalibrationSequence;
 };
 
 struct ImuState {
+  float rawRollDeg;
+  float rawPitchDeg;
   float rollDeg;
   float pitchDeg;
   float yawDeg;
   float gyroXDegPerSec;
   float gyroYDegPerSec;
   float gyroZDegPerSec;
+  float levelRollOffsetDeg;
+  float levelPitchOffsetDeg;
   bool ready;
 };
 
@@ -105,11 +116,16 @@ float motorOutputs[MOTOR_COUNT] = {};
 float gyroBiasX = 0.0f;
 float gyroBiasY = 0.0f;
 float gyroBiasZ = 0.0f;
+uint32_t lastHandledLevelCalibrationSequence = 0;
+uint8_t consecutiveImuFailures = 0;
 
 unsigned long lastCommandRxMs = 0;
 unsigned long armStartMs = 0;
 unsigned long lastStatusPrintMs = 0;
+unsigned long nextImuInitAttemptMs = 0;
+unsigned long lastImuErrorLogMs = 0;
 bool motorsEnabled = false;
+bool imuConfigured = false;
 
 float clampf(float value, float minValue, float maxValue) {
   if (value < minValue) {
@@ -156,6 +172,7 @@ FlightCommand makeDefaultFlightCommand() {
   command.maxThrottle = 0.82f;
   command.maxTiltDeg = 12.0f;
   command.maxYawRateDeg = 120.0f;
+  command.levelCalibrationSequence = 0;
   return command;
 }
 
@@ -257,6 +274,23 @@ bool parseBoolFlagEither(const char *json, const char *primaryKey, const char *f
   return parseBoolFlag(json, primaryKey, value) || parseBoolFlag(json, fallbackKey, value);
 }
 
+bool parseUnsignedValue(const char *json, const char *key, uint32_t &value) {
+  const char *cursor = strstr(json, key);
+  if (cursor == nullptr) {
+    return false;
+  }
+  cursor += strlen(key);
+
+  char *parseEnd = nullptr;
+  const unsigned long parsedValue = strtoul(cursor, &parseEnd, 10);
+  if (parseEnd == cursor) {
+    return false;
+  }
+
+  value = static_cast<uint32_t>(parsedValue);
+  return true;
+}
+
 bool parseFloatArrayEither(
   const char *json,
   const char *primaryKey,
@@ -277,6 +311,8 @@ bool parseFlightCommandPayload(const char *payload, FlightCommand &nextCommand) 
   float values4[4] = {};
   float limits[5] = {};
   float pidBundle[21] = {};
+
+  parsed.levelCalibrationSequence = 0;
 
   if (!parseBoolFlagEither(payload, "\"a\":", "\"arm\":", parsed.armed)) {
     return false;
@@ -349,6 +385,7 @@ bool parseFlightCommandPayload(const char *payload, FlightCommand &nextCommand) 
   parsed.maxThrottle = clampf(limits[2], parsed.hoverThrottle, 1.0f);
   parsed.maxTiltDeg = clampf(limits[3], 1.0f, 45.0f);
   parsed.maxYawRateDeg = clampf(limits[4], 1.0f, 360.0f);
+  parseUnsignedValue(payload, "\"l\":", parsed.levelCalibrationSequence);
 
   nextCommand = parsed;
   return true;
@@ -417,34 +454,69 @@ void stopMotors() {
   resetAllPidStates();
 }
 
+void logImuError(const char *message) {
+  if ((millis() - lastImuErrorLogMs) < IMU_ERROR_LOG_INTERVAL_MS) {
+    return;
+  }
+  lastImuErrorLogMs = millis();
+  Serial.println(message);
+}
+
+void initI2cBus() {
+  pinMode(I2C_SDA_PIN, INPUT_PULLUP);
+  pinMode(I2C_SCL_PIN, INPUT_PULLUP);
+  Wire.end();
+  delay(2);
+  Wire.begin(I2C_SDA_PIN, I2C_SCL_PIN, I2C_FREQUENCY_HZ);
+  Wire.setTimeOut(I2C_TIMEOUT_MS);
+  delay(10);
+}
+
 bool writeMpuRegister(uint8_t reg, uint8_t value) {
-  Wire.beginTransmission(MPU6050_ADDRESS);
-  Wire.write(reg);
-  Wire.write(value);
-  return Wire.endTransmission() == 0;
+  for (uint8_t attempt = 0; attempt < I2C_TRANSACTION_RETRIES; ++attempt) {
+    Wire.beginTransmission(MPU6050_ADDRESS);
+    Wire.write(reg);
+    Wire.write(value);
+    if (Wire.endTransmission() == 0) {
+      return true;
+    }
+
+    if (attempt + 1 < I2C_TRANSACTION_RETRIES) {
+      delay(2);
+      initI2cBus();
+    }
+  }
+  return false;
 }
 
 bool readMpuRegisters(uint8_t startRegister, uint8_t *buffer, size_t length) {
-  Wire.beginTransmission(MPU6050_ADDRESS);
-  Wire.write(startRegister);
-  if (Wire.endTransmission(false) != 0) {
-    return false;
-  }
+  for (uint8_t attempt = 0; attempt < I2C_TRANSACTION_RETRIES; ++attempt) {
+    Wire.beginTransmission(MPU6050_ADDRESS);
+    Wire.write(startRegister);
+    if (Wire.endTransmission(false) == 0) {
+      const size_t bytesRead = Wire.requestFrom(
+        MPU6050_ADDRESS,
+        static_cast<uint8_t>(length),
+        static_cast<uint8_t>(true)
+      );
+      if (bytesRead == length) {
+        for (size_t index = 0; index < length; ++index) {
+          buffer[index] = Wire.read();
+        }
+        return true;
+      }
+    }
 
-  const size_t bytesRead = Wire.requestFrom(MPU6050_ADDRESS, static_cast<uint8_t>(length), static_cast<uint8_t>(true));
-  if (bytesRead != length) {
-    return false;
+    if (attempt + 1 < I2C_TRANSACTION_RETRIES) {
+      delay(2);
+      initI2cBus();
+    }
   }
-
-  for (size_t index = 0; index < length; ++index) {
-    buffer[index] = Wire.read();
-  }
-  return true;
+  return false;
 }
 
 bool initMpu6050() {
-  Wire.begin(I2C_SDA_PIN, I2C_SCL_PIN, 400000);
-  delay(50);
+  initI2cBus();
 
   uint8_t whoAmI = 0;
   if (!readMpuRegisters(0x75, &whoAmI, 1)) {
@@ -458,13 +530,59 @@ bool initMpu6050() {
   }
   delay(20);
 
-  writeMpuRegister(0x1A, 0x03);
-  writeMpuRegister(0x1B, 0x08);
-  writeMpuRegister(0x1C, 0x00);
+  if (!writeMpuRegister(0x1A, 0x03) || !writeMpuRegister(0x1B, 0x08) || !writeMpuRegister(0x1C, 0x00)) {
+    Serial.println("Failed to configure MPU6050 registers.");
+    return false;
+  }
 
   Serial.print("MPU6050 ready. WHO_AM_I = 0x");
   Serial.println(whoAmI, HEX);
   return true;
+}
+
+bool bringUpMpu6050() {
+  if (!initMpu6050()) {
+    logImuError("MPU6050 init failed. Check 3.3V, GND, SDA, SCL, and pull-ups.");
+    imuConfigured = false;
+    return false;
+  }
+  if (!calibrateGyroBias()) {
+    logImuError("MPU6050 gyro calibration failed. Retrying.");
+    imuConfigured = false;
+    return false;
+  }
+
+  imuConfigured = true;
+  consecutiveImuFailures = 0;
+  imuState.ready = false;
+  imuState.rawRollDeg = 0.0f;
+  imuState.rawPitchDeg = 0.0f;
+  imuState.rollDeg = 0.0f;
+  imuState.pitchDeg = 0.0f;
+  imuState.yawDeg = 0.0f;
+  imuState.gyroXDegPerSec = 0.0f;
+  imuState.gyroYDegPerSec = 0.0f;
+  imuState.gyroZDegPerSec = 0.0f;
+  Serial.printf(
+    "MPU6050 online on SDA=%u SCL=%u at %lu Hz.\n",
+    static_cast<unsigned>(I2C_SDA_PIN),
+    static_cast<unsigned>(I2C_SCL_PIN),
+    static_cast<unsigned long>(I2C_FREQUENCY_HZ)
+  );
+  return true;
+}
+
+bool ensureMpu6050Ready() {
+  if (imuConfigured) {
+    return true;
+  }
+  if (millis() < nextImuInitAttemptMs) {
+    return false;
+  }
+
+  nextImuInitAttemptMs = millis() + IMU_REINIT_RETRY_MS;
+  Serial.println("Attempting MPU6050 bring-up...");
+  return bringUpMpu6050();
 }
 
 bool calibrateGyroBias() {
@@ -509,8 +627,18 @@ bool calibrateGyroBias() {
 bool updateImuEstimate(float dtSeconds) {
   uint8_t rawData[14] = {};
   if (!readMpuRegisters(0x3B, rawData, sizeof(rawData))) {
+    if (consecutiveImuFailures < 255) {
+      ++consecutiveImuFailures;
+    }
+    if (consecutiveImuFailures >= IMU_FAILURES_BEFORE_REINIT) {
+      imuConfigured = false;
+      imuState.ready = false;
+      nextImuInitAttemptMs = 0;
+      logImuError("Lost MPU6050 I2C link. Reinitialising at 100 kHz.");
+    }
     return false;
   }
+  consecutiveImuFailures = 0;
 
   const int16_t accelXRaw = static_cast<int16_t>((rawData[0] << 8) | rawData[1]);
   const int16_t accelYRaw = static_cast<int16_t>((rawData[2] << 8) | rawData[3]);
@@ -546,19 +674,52 @@ bool updateImuEstimate(float dtSeconds) {
   ) * RAD_TO_DEG_F;
 
   if (!imuState.ready) {
-    imuState.rollDeg = rollAccDeg;
-    imuState.pitchDeg = pitchAccDeg;
+    imuState.rawRollDeg = rollAccDeg;
+    imuState.rawPitchDeg = pitchAccDeg;
     imuState.yawDeg = 0.0f;
     imuState.ready = true;
   } else {
-    imuState.rollDeg = (COMPLEMENTARY_ALPHA * (imuState.rollDeg + (imuState.gyroXDegPerSec * dtSeconds)))
+    imuState.rawRollDeg = (COMPLEMENTARY_ALPHA * (imuState.rawRollDeg + (imuState.gyroXDegPerSec * dtSeconds)))
       + ((1.0f - COMPLEMENTARY_ALPHA) * rollAccDeg);
-    imuState.pitchDeg = (COMPLEMENTARY_ALPHA * (imuState.pitchDeg + (imuState.gyroYDegPerSec * dtSeconds)))
+    imuState.rawPitchDeg = (COMPLEMENTARY_ALPHA * (imuState.rawPitchDeg + (imuState.gyroYDegPerSec * dtSeconds)))
       + ((1.0f - COMPLEMENTARY_ALPHA) * pitchAccDeg);
     imuState.yawDeg = wrapDegrees(imuState.yawDeg + (imuState.gyroZDegPerSec * dtSeconds));
   }
 
+  imuState.rollDeg = imuState.rawRollDeg - imuState.levelRollOffsetDeg;
+  imuState.pitchDeg = imuState.rawPitchDeg - imuState.levelPitchOffsetDeg;
+
   return true;
+}
+
+void processLevelCalibrationRequest() {
+  const uint32_t sequence = flightCommand.levelCalibrationSequence;
+  if (sequence == 0 || sequence == lastHandledLevelCalibrationSequence) {
+    return;
+  }
+
+  if (!imuState.ready) {
+    Serial.println("Delaying IMU level calibration: IMU estimate is not ready yet.");
+    return;
+  }
+
+  lastHandledLevelCalibrationSequence = sequence;
+  if (flightCommand.armed || motorsEnabled) {
+    Serial.println("Ignoring IMU level calibration request while the drone is armed.");
+    return;
+  }
+
+  imuState.levelRollOffsetDeg = imuState.rawRollDeg;
+  imuState.levelPitchOffsetDeg = imuState.rawPitchDeg;
+  imuState.rollDeg = 0.0f;
+  imuState.pitchDeg = 0.0f;
+  resetAllPidStates();
+  Serial.printf(
+    "IMU level reference captured: rollOffset=%.2f pitchOffset=%.2f seq=%lu\n",
+    imuState.levelRollOffsetDeg,
+    imuState.levelPitchOffsetDeg,
+    static_cast<unsigned long>(sequence)
+  );
 }
 
 void normalizeMotorOutputs(float outputs[MOTOR_COUNT]) {
@@ -749,11 +910,7 @@ void setup() {
     Serial.println("ESP-NOW receiver failed to initialise.");
   }
 
-  if (!initMpu6050()) {
-    Serial.println("MPU6050 failed to initialise.");
-  } else if (!calibrateGyroBias()) {
-    Serial.println("MPU6050 gyro bias calibration failed.");
-  }
+  bringUpMpu6050();
 
   Serial.println("Hover controller ready. Waiting for compact control payloads.");
 }
@@ -767,9 +924,12 @@ void loop() {
 
   processIncomingPayloads();
 
-  if (!updateImuEstimate(dtSeconds)) {
+  if (!ensureMpu6050Ready()) {
+    stopMotors();
+  } else if (!updateImuEstimate(dtSeconds)) {
     stopMotors();
   } else {
+    processLevelCalibrationRequest();
     runHoverController(dtSeconds);
   }
 

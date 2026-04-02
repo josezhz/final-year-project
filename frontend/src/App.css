@@ -241,6 +241,13 @@ button:hover {
   opacity: 0.95;
 }
 
+button:disabled,
+button:disabled:hover {
+  cursor: not-allowed;
+  opacity: 0.55;
+  transform: none;
+}
+
 .primary-button {
   background: linear-gradient(135deg, #ff9f1c, #ffbf69);
   color: #1a1f2b;
