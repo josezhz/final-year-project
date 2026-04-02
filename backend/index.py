@@ -54,8 +54,8 @@ MAX_ESP_NOW_PAYLOAD_BYTES = 250
 IMU_LEVEL_CALIBRATION_RETRY_SECONDS = 1.0
 
 CONTROL_PID_DEFAULTS = {
-    "x": {"kp": 6.0, "ki": 0.0, "kd": 2.2},
-    "y": {"kp": 6.0, "ki": 0.0, "kd": 2.2},
+    "x": {"kp": 17.5, "ki": 0.0, "kd": 0.5},
+    "y": {"kp": 17.5, "ki": 0.0, "kd": 0.5},
     "z": {"kp": 0.9, "ki": 0.35, "kd": 0.18},
     "yaw": {"kp": 4.5, "ki": 0.0, "kd": 0.12},
     "roll": {"kp": 0.022, "ki": 0.0, "kd": 0.0014},
@@ -97,7 +97,7 @@ DEFAULT_TELEMETRY = {
 }
 PREVIEW_WIDTH = 240
 PREVIEW_JPEG_QUALITY = 45
-MAX_LED_REORDER_COST_PIXELS = 30.0
+MAX_LED_REORDER_COST_PIXELS = 50
 MAPPING_TEMPORAL_WEIGHT = 120.0
 
 
