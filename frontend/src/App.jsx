@@ -5,6 +5,7 @@ import './App.css';
 
 const EMPTY_TELEMETRY = {
   position: { x: 0, y: 0, z: 0 },
+  velocity: { x: 0, y: 0, z: 0 },
   rotation: { yaw: 0, pitch: 0, roll: 0 },
   error: 0,
   mapping_error_px: 0,
@@ -17,10 +18,11 @@ const EMPTY_TELEMETRY = {
 
 const PID_TERMS = ['kp', 'ki', 'kd'];
 const DEFAULT_PID = {
-  x: { kp: 6, ki: 0, kd: 2.2 },
-  y: { kp: 6, ki: 0, kd: 2.2 },
-  z: { kp: 0.9, ki: 0.35, kd: 0.18 },
-  yaw: { kp: 4.5, ki: 0, kd: 0.12 },
+  xyPos: { kp: 1, ki: 0, kd: 0 },
+  zPos: { kp: 1.5, ki: 0, kd: 0 },
+  yawPos: { kp: 0.3, ki: 0.1, kd: 0.05 },
+  xyVel: { kp: 0.2, ki: 0.03, kd: 0.05 },
+  zVel: { kp: 0.3, ki: 0.1, kd: 0.05 },
   roll: { kp: 0.022, ki: 0, kd: 0.0014 },
   pitch: { kp: 0.022, ki: 0, kd: 0.0014 },
   yawRate: { kp: 0.006, ki: 0, kd: 0 },
@@ -28,7 +30,7 @@ const DEFAULT_PID = {
 const DEFAULT_TARGET = {
   x: 0,
   y: 0,
-  z: 0.35,
+  z: 0.25,
   yaw: 0,
 };
 const DEFAULT_LIMITS = {
@@ -797,6 +799,12 @@ function App() {
     y: Number(telemetry.position?.y ?? 0),
     z: Number(telemetry.position?.z ?? 0),
   };
+  const liveVelocity = {
+    x: Number(telemetry.velocity?.x ?? 0),
+    y: Number(telemetry.velocity?.y ?? 0),
+    z: Number(telemetry.velocity?.z ?? 0),
+  };
+  const liveHorizontalSpeed = Math.hypot(liveVelocity.x, liveVelocity.y);
   const liveRotation = {
     yaw: Number(telemetry.rotation?.yaw ?? 0),
     pitch: Number(telemetry.rotation?.pitch ?? 0),
@@ -923,10 +931,11 @@ function App() {
   ];
   const outerLoopCards = [
     {
-      axis: 'x',
+      id: 'x-pos',
+      pidAxis: 'xyPos',
       axisLabel: 'X position',
       title: 'Lock the forward lane',
-      description: 'In the mocap frame, +X is forward, so this loop governs fore-aft position hold.',
+      description: 'In the mocap frame, +X is forward. This card shares one XY position profile with Y, matching the Low-Cost-Mocap cascade.',
       liveLabel: 'Current X',
       liveValue: livePosition.x,
       targetLabel: 'Target X',
@@ -935,13 +944,14 @@ function App() {
       errorValue: targetError.x,
       unit: ' m',
       step: '0.01',
-      note: 'Raise Kp until the craft returns crisply, then add Kd to calm overshoot.',
+      note: 'These gains generate desired world velocity rather than direct tilt, so keep X and Y tuned together.',
     },
     {
-      axis: 'y',
+      id: 'y-pos',
+      pidAxis: 'xyPos',
       axisLabel: 'Y position',
       title: 'Correct left-right drift',
-      description: 'In the mocap frame, +Y is left, so this loop governs lateral drift across the lane.',
+      description: 'In the mocap frame, +Y is left. This is the second readout of the same shared XY position controller.',
       liveLabel: 'Current Y',
       liveValue: livePosition.y,
       targetLabel: 'Target Y',
@@ -950,13 +960,14 @@ function App() {
       errorValue: targetError.y,
       unit: ' m',
       step: '0.01',
-      note: 'Finish one lateral axis at a time so cross-coupling remains easy to see.',
+      note: 'Use this card to watch lateral symmetry while editing the shared XY position gains above.',
     },
     {
-      axis: 'z',
+      id: 'z-pos',
+      pidAxis: 'zPos',
       axisLabel: 'Z altitude',
       title: 'Balance the hover column',
-      description: 'Altitude gains shape how quickly the brushed motors recover after vertical disturbances.',
+      description: 'Altitude error now becomes a desired climb rate first, which then passes through the vertical velocity loop before throttle is mixed.',
       liveLabel: 'Current Z',
       liveValue: livePosition.z,
       targetLabel: 'Target Z',
@@ -965,10 +976,11 @@ function App() {
       errorValue: targetError.z,
       unit: ' m',
       step: '0.01',
-      note: 'Use Ki carefully here if the drone slowly sags below the desired hover height.',
+      note: 'Set the climb response you want here, then use the Z velocity card below to remove bounce and floatiness.',
     },
     {
-      axis: 'yaw',
+      id: 'yaw-pos',
+      pidAxis: 'yawPos',
       axisLabel: 'Yaw heading',
       title: 'Point the frame cleanly',
       description: 'Heading should settle before you trust XY response, and a 0 deg target means nose aligned with world +X.',
@@ -983,7 +995,39 @@ function App() {
       errorDigits: 2,
       unit: ' deg',
       step: '0.01',
-      note: 'Keep yaw slightly overdamped so position tuning is not contaminated by heading wander.',
+      note: 'This remains a conventional outer yaw loop that commands yaw rate into the inner gyro controller.',
+    },
+    {
+      id: 'xy-vel',
+      pidAxis: 'xyVel',
+      axisLabel: 'XY velocity',
+      title: 'Damp lateral momentum',
+      description: 'This is the Low-Cost-Mocap-style damping stage: desired world velocity is compared against mocap velocity before tilt is commanded.',
+      liveLabel: 'Horizontal speed',
+      liveValue: liveHorizontalSpeed,
+      targetLabel: 'Steady hover',
+      targetValue: 0,
+      errorLabel: 'Residual speed',
+      errorValue: liveHorizontalSpeed,
+      unit: ' m/s',
+      step: '0.01',
+      note: 'Increase these gains once the shared XY position loop is reasonable, then stop when overshoot and drift start to vanish.',
+    },
+    {
+      id: 'z-vel',
+      pidAxis: 'zVel',
+      axisLabel: 'Z velocity',
+      title: 'Settle climb and sink rate',
+      description: 'The vertical damping loop compares desired climb rate with measured mocap Z velocity before throttle is adjusted.',
+      liveLabel: 'Vertical speed',
+      liveValue: liveVelocity.z,
+      targetLabel: 'Steady hover',
+      targetValue: 0,
+      errorLabel: 'Residual Vz',
+      errorValue: liveVelocity.z,
+      unit: ' m/s',
+      step: '0.01',
+      note: 'Use this card to remove altitude bounce. Add Ki only if steady hover still drifts after damping is stable.',
     },
   ];
   const innerLoopCards = [
@@ -1363,6 +1407,18 @@ function App() {
                 <strong>{formatNumber(telemetry.position.z)}</strong>
               </div>
               <div className="metric-card">
+                <span>Velocity X</span>
+                <strong>{formatNumber(telemetry.velocity?.x ?? 0)}</strong>
+              </div>
+              <div className="metric-card">
+                <span>Velocity Y</span>
+                <strong>{formatNumber(telemetry.velocity?.y ?? 0)}</strong>
+              </div>
+              <div className="metric-card">
+                <span>Velocity Z</span>
+                <strong>{formatNumber(telemetry.velocity?.z ?? 0)}</strong>
+              </div>
+              <div className="metric-card">
                 <span>Yaw</span>
                 <strong>{formatNumber(telemetry.rotation.yaw, 2)} deg</strong>
               </div>
@@ -1487,11 +1543,13 @@ function App() {
             <div className="pid-focus-banner">
               <div>
                 <span className="meta-label">Workflow</span>
-                <strong>Tune position first, attitude second</strong>
+                <strong>Tune the cascade outside-in</strong>
               </div>
               <p>
-                Start by trimming X and Y drift, then settle altitude and heading, and only then
-                tighten the MPU6050-backed roll, pitch, and yaw-rate loops.
+                Start with the shared XY and Z position gains, then tune the XY and Z velocity
+                damping stage borrowed from Low-Cost-Mocap, and only then tighten the MPU6050-backed
+                roll, pitch, and yaw-rate loops. In this project that cascade feeds our direct motor
+                mixer instead of an external SBUS flight controller.
               </p>
             </div>
 
@@ -1500,19 +1558,19 @@ function App() {
                 <div className="loop-head">
                   <div>
                     <span className="meta-label">Outer loop</span>
-                    <strong>World-frame position and heading</strong>
+                    <strong>World-frame position, heading, and velocity</strong>
                   </div>
-                  <p>The mocap target cards above tell you whether each axis is already within a stable hover band.</p>
+                  <p>The X and Y cards intentionally share one XY position profile, followed by separate XY and Z velocity damping cards.</p>
                 </div>
                 <div className="pid-card-grid">
                   {outerLoopCards.map((card) => (
                     <PidAxisCard
-                      key={card.axis}
+                      key={card.id}
                       tone="outer"
                       axisLabel={card.axisLabel}
                       title={card.title}
                       description={card.description}
-                      pid={localControl.pid[card.axis]}
+                      pid={localControl.pid[card.pidAxis] ?? DEFAULT_PID[card.pidAxis]}
                       step={card.step}
                       liveLabel={card.liveLabel}
                       liveValue={card.liveValue}
@@ -1525,7 +1583,7 @@ function App() {
                       errorDigits={card.errorDigits}
                       unit={card.unit}
                       note={card.note}
-                      onChange={(term, value) => updatePidValue(card.axis, term, value)}
+                      onChange={(term, value) => updatePidValue(card.pidAxis, term, value)}
                     />
                   ))}
                 </div>
@@ -1547,7 +1605,7 @@ function App() {
                       axisLabel={card.axisLabel}
                       title={card.title}
                       description={card.description}
-                      pid={localControl.pid[card.axis]}
+                      pid={localControl.pid[card.axis] ?? DEFAULT_PID[card.axis]}
                       step={card.step}
                       liveLabel={card.liveLabel}
                       liveValue={card.liveValue}

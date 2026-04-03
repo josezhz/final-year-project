@@ -31,6 +31,8 @@ constexpr float GYRO_SCALE_LSB_PER_DEG_PER_SEC = 65.5f;
 constexpr float RAD_TO_DEG_F = 57.2957795f;
 constexpr float DEG_TO_RAD_F = 0.0174532925f;
 constexpr float COMPLEMENTARY_ALPHA = 0.98f;
+constexpr float MAX_WORLD_XY_VELOCITY_MPS = 0.8f;
+constexpr float MAX_WORLD_Z_VELOCITY_MPS = 0.5f;
 // Observed IMU mounting on this airframe:
 // - nose down was reported as +roll
 // - CCW roll (viewed from the back) was reported as +pitch
@@ -66,12 +68,14 @@ struct FlightCommand {
   bool armed;
   bool spatialValid;
   float position[3];
+  float velocity[3];
   float rotation[3];
   float target[4];
-  PidGains posX;
-  PidGains posY;
-  PidGains posZ;
-  PidGains yaw;
+  PidGains xyPos;
+  PidGains zPos;
+  PidGains yawPos;
+  PidGains xyVel;
+  PidGains zVel;
   PidGains roll;
   PidGains pitch;
   PidGains yawRate;
@@ -108,6 +112,9 @@ PidState posXPid = {};
 PidState posYPid = {};
 PidState posZPid = {};
 PidState yawOuterPid = {};
+PidState xVelPid = {};
+PidState yVelPid = {};
+PidState zVelPid = {};
 PidState rollPid = {};
 PidState pitchPid = {};
 PidState yawRatePid = {};
@@ -158,12 +165,13 @@ FlightCommand makeDefaultFlightCommand() {
   command.spatialValid = false;
   command.target[0] = 0.0f;
   command.target[1] = 0.0f;
-  command.target[2] = 0.35f;
+  command.target[2] = 0.25f;
   command.target[3] = 0.0f;  // Hold the nose on the mocap world +X axis by default.
-  command.posX = makePidGains(6.0f, 0.0f, 2.2f);
-  command.posY = makePidGains(6.0f, 0.0f, 2.2f);
-  command.posZ = makePidGains(0.9f, 0.35f, 0.18f);
-  command.yaw = makePidGains(4.5f, 0.0f, 0.12f);
+  command.xyPos = makePidGains(1.0f, 0.0f, 0.0f);
+  command.zPos = makePidGains(1.5f, 0.0f, 0.0f);
+  command.yawPos = makePidGains(0.3f, 0.1f, 0.05f);
+  command.xyVel = makePidGains(0.2f, 0.03f, 0.05f);
+  command.zVel = makePidGains(0.3f, 0.1f, 0.05f);
   command.roll = makePidGains(0.022f, 0.0f, 0.0014f);
   command.pitch = makePidGains(0.022f, 0.0f, 0.0014f);
   command.yawRate = makePidGains(0.006f, 0.0f, 0.0f);
@@ -187,6 +195,9 @@ void resetAllPidStates() {
   resetPidState(posYPid);
   resetPidState(posZPid);
   resetPidState(yawOuterPid);
+  resetPidState(xVelPid);
+  resetPidState(yVelPid);
+  resetPidState(zVelPid);
   resetPidState(rollPid);
   resetPidState(pitchPid);
   resetPidState(yawRatePid);
@@ -209,6 +220,16 @@ float runPid(const PidGains &gains, PidState &state, float error, float dtSecond
   state.hasPreviousError = true;
 
   return (gains.kp * error) + (gains.ki * state.integral) + (gains.kd * derivative);
+}
+
+float throttleFromNormalizedCommand(float command) {
+  command = clampf(command, -1.0f, 1.0f);
+  if (command >= 0.0f) {
+    return flightCommand.hoverThrottle
+      + (command * (flightCommand.maxThrottle - flightCommand.hoverThrottle));
+  }
+  return flightCommand.hoverThrottle
+    + (command * (flightCommand.hoverThrottle - flightCommand.minThrottle));
 }
 
 bool parseBoolFlag(const char *json, const char *key, bool &value) {
@@ -305,12 +326,68 @@ PidGains gainsFromTriplet(const float values[3]) {
   return makePidGains(values[0], values[1], values[2]);
 }
 
+bool parsePidProfilePayload(const char *payload, FlightCommand &parsed) {
+  float pidBundle[24] = {};
+  float values3[3] = {};
+
+  if (parseFloatArray(payload, "\"u\":", pidBundle, 24)) {
+    parsed.xyPos = makePidGains(pidBundle[0], pidBundle[1], pidBundle[2]);
+    parsed.zPos = makePidGains(pidBundle[3], pidBundle[4], pidBundle[5]);
+    parsed.yawPos = makePidGains(pidBundle[6], pidBundle[7], pidBundle[8]);
+    parsed.xyVel = makePidGains(pidBundle[9], pidBundle[10], pidBundle[11]);
+    parsed.zVel = makePidGains(pidBundle[12], pidBundle[13], pidBundle[14]);
+    parsed.roll = makePidGains(pidBundle[15], pidBundle[16], pidBundle[17]);
+    parsed.pitch = makePidGains(pidBundle[18], pidBundle[19], pidBundle[20]);
+    parsed.yawRate = makePidGains(pidBundle[21], pidBundle[22], pidBundle[23]);
+    return true;
+  }
+
+  if (!parseFloatArray(payload, "\"xp\":", values3, 3)) {
+    return false;
+  }
+  parsed.xyPos = gainsFromTriplet(values3);
+
+  if (!parseFloatArray(payload, "\"zp\":", values3, 3)) {
+    return false;
+  }
+  parsed.zPos = gainsFromTriplet(values3);
+
+  if (!parseFloatArray(payload, "\"yp\":", values3, 3)) {
+    return false;
+  }
+  parsed.yawPos = gainsFromTriplet(values3);
+
+  if (!parseFloatArray(payload, "\"xv\":", values3, 3)) {
+    return false;
+  }
+  parsed.xyVel = gainsFromTriplet(values3);
+
+  if (!parseFloatArray(payload, "\"zv\":", values3, 3)) {
+    return false;
+  }
+  parsed.zVel = gainsFromTriplet(values3);
+
+  if (!parseFloatArray(payload, "\"rp\":", values3, 3)) {
+    return false;
+  }
+  parsed.roll = gainsFromTriplet(values3);
+
+  if (!parseFloatArray(payload, "\"pp\":", values3, 3)) {
+    return false;
+  }
+  parsed.pitch = gainsFromTriplet(values3);
+
+  if (!parseFloatArray(payload, "\"yr\":", values3, 3)) {
+    return false;
+  }
+  parsed.yawRate = gainsFromTriplet(values3);
+  return true;
+}
+
 bool parseFlightCommandPayload(const char *payload, FlightCommand &nextCommand) {
   FlightCommand parsed = flightCommand;
-  float values3[3] = {};
   float values4[4] = {};
   float limits[5] = {};
-  float pidBundle[21] = {};
 
   parsed.levelCalibrationSequence = 0;
 
@@ -323,6 +400,10 @@ bool parseFlightCommandPayload(const char *payload, FlightCommand &nextCommand) 
   if (!parseFloatArray(payload, "\"p\":", parsed.position, 3)) {
     return false;
   }
+  parsed.velocity[0] = 0.0f;
+  parsed.velocity[1] = 0.0f;
+  parsed.velocity[2] = 0.0f;
+  parseFloatArrayEither(payload, "\"d\":", "\"vel\":", parsed.velocity, 3);
   if (!parseFloatArray(payload, "\"r\":", parsed.rotation, 3)) {
     return false;
   }
@@ -331,49 +412,8 @@ bool parseFlightCommandPayload(const char *payload, FlightCommand &nextCommand) 
   }
   memcpy(parsed.target, values4, sizeof(values4));
 
-  if (parseFloatArray(payload, "\"u\":", pidBundle, 21)) {
-    parsed.posX = makePidGains(pidBundle[0], pidBundle[1], pidBundle[2]);
-    parsed.posY = makePidGains(pidBundle[3], pidBundle[4], pidBundle[5]);
-    parsed.posZ = makePidGains(pidBundle[6], pidBundle[7], pidBundle[8]);
-    parsed.yaw = makePidGains(pidBundle[9], pidBundle[10], pidBundle[11]);
-    parsed.roll = makePidGains(pidBundle[12], pidBundle[13], pidBundle[14]);
-    parsed.pitch = makePidGains(pidBundle[15], pidBundle[16], pidBundle[17]);
-    parsed.yawRate = makePidGains(pidBundle[18], pidBundle[19], pidBundle[20]);
-  } else {
-    if (!parseFloatArray(payload, "\"x\":", values3, 3)) {
-      return false;
-    }
-    parsed.posX = gainsFromTriplet(values3);
-
-    if (!parseFloatArray(payload, "\"y\":", values3, 3)) {
-      return false;
-    }
-    parsed.posY = gainsFromTriplet(values3);
-
-    if (!parseFloatArray(payload, "\"z\":", values3, 3)) {
-      return false;
-    }
-    parsed.posZ = gainsFromTriplet(values3);
-
-    if (!parseFloatArray(payload, "\"w\":", values3, 3)) {
-      return false;
-    }
-    parsed.yaw = gainsFromTriplet(values3);
-
-    if (!parseFloatArray(payload, "\"rp\":", values3, 3)) {
-      return false;
-    }
-    parsed.roll = gainsFromTriplet(values3);
-
-    if (!parseFloatArray(payload, "\"pp\":", values3, 3)) {
-      return false;
-    }
-    parsed.pitch = gainsFromTriplet(values3);
-
-    if (!parseFloatArray(payload, "\"yr\":", values3, 3)) {
-      return false;
-    }
-    parsed.yawRate = gainsFromTriplet(values3);
+  if (!parsePidProfilePayload(payload, parsed)) {
+    return false;
   }
 
   if (!parseFloatArrayEither(payload, "\"m\":", "\"lm\":", limits, 5)) {
@@ -774,31 +814,107 @@ void runHoverController(float dtSeconds) {
   const float yError = flightCommand.target[1] - flightCommand.position[1];
   const float zError = flightCommand.target[2] - flightCommand.position[2];
   const float yawError = wrapDegrees(flightCommand.target[3] - flightCommand.rotation[0]);
+  const float worldXVelocity = flightCommand.velocity[0];
+  const float worldYVelocity = flightCommand.velocity[1];
+  const float worldZVelocity = flightCommand.velocity[2];
 
-  const float worldXCommand = runPid(flightCommand.posX, posXPid, xError, dtSeconds, 0.4f);
-  const float worldYCommand = runPid(flightCommand.posY, posYPid, yError, dtSeconds, 0.4f);
-  const float throttleCorrection = runPid(flightCommand.posZ, posZPid, zError, dtSeconds, 0.5f);
+  const float desiredWorldXVelocity = clampf(
+    runPid(
+      flightCommand.xyPos,
+      posXPid,
+      xError,
+      dtSeconds,
+      MAX_WORLD_XY_VELOCITY_MPS
+    ),
+    -MAX_WORLD_XY_VELOCITY_MPS,
+    MAX_WORLD_XY_VELOCITY_MPS
+  );
+  const float desiredWorldYVelocity = clampf(
+    runPid(
+      flightCommand.xyPos,
+      posYPid,
+      yError,
+      dtSeconds,
+      MAX_WORLD_XY_VELOCITY_MPS
+    ),
+    -MAX_WORLD_XY_VELOCITY_MPS,
+    MAX_WORLD_XY_VELOCITY_MPS
+  );
+  const float desiredWorldZVelocity = clampf(
+    runPid(
+      flightCommand.zPos,
+      posZPid,
+      zError,
+      dtSeconds,
+      MAX_WORLD_Z_VELOCITY_MPS
+    ),
+    -MAX_WORLD_Z_VELOCITY_MPS,
+    MAX_WORLD_Z_VELOCITY_MPS
+  );
+
+  const float worldXCommand = clampf(
+    runPid(
+      flightCommand.xyVel,
+      xVelPid,
+      desiredWorldXVelocity - worldXVelocity,
+      dtSeconds,
+      1.0f
+    ),
+    -1.0f,
+    1.0f
+  );
+  const float worldYCommand = clampf(
+    runPid(
+      flightCommand.xyVel,
+      yVelPid,
+      desiredWorldYVelocity - worldYVelocity,
+      dtSeconds,
+      1.0f
+    ),
+    -1.0f,
+    1.0f
+  );
+  const float zVelocityCommand = clampf(
+    runPid(
+      flightCommand.zVel,
+      zVelPid,
+      desiredWorldZVelocity - worldZVelocity,
+      dtSeconds,
+      1.0f
+    ),
+    -1.0f,
+    1.0f
+  );
   const float desiredYawRate = clampf(
-    runPid(flightCommand.yaw, yawOuterPid, yawError, dtSeconds, 45.0f),
+    runPid(
+      flightCommand.yawPos,
+      yawOuterPid,
+      yawError,
+      dtSeconds,
+      45.0f
+    ),
     -flightCommand.maxYawRateDeg,
     flightCommand.maxYawRateDeg
   );
 
   const float yawRad = flightCommand.rotation[0] * DEG_TO_RAD_F;
-  // Mocap pose uses +X forward, +Y left, +Z up. The IMU/mixer uses
-  // +forward and +right, so the lateral body-right command must negate
-  // the mocap Y axis while rotating the world-frame demand into body frame.
-  const float forwardCommand = (cosf(yawRad) * worldXCommand) + (sinf(yawRad) * worldYCommand);
-  const float rightCommand = (sinf(yawRad) * worldXCommand) - (cosf(yawRad) * worldYCommand);
-
-  const float desiredPitchDeg = clampf(-forwardCommand, -flightCommand.maxTiltDeg, flightCommand.maxTiltDeg);
-  const float desiredRollDeg = clampf(rightCommand, -flightCommand.maxTiltDeg, flightCommand.maxTiltDeg);
-
-  const float requestedThrottle = clampf(
-    flightCommand.hoverThrottle + throttleCorrection,
-    flightCommand.minThrottle,
-    flightCommand.maxThrottle
+  // Low-Cost-Mocap drives a separate flight controller over SBUS. Here we
+  // adapt the same position -> velocity cascade into normalized world-frame
+  // demands, then turn those into tilt/throttle targets for our direct mixer.
+  const float forwardCommand = clampf(
+    (cosf(yawRad) * worldXCommand) + (sinf(yawRad) * worldYCommand),
+    -1.0f,
+    1.0f
   );
+  const float rightCommand = clampf(
+    (sinf(yawRad) * worldXCommand) - (cosf(yawRad) * worldYCommand),
+    -1.0f,
+    1.0f
+  );
+
+  const float desiredPitchDeg = -forwardCommand * flightCommand.maxTiltDeg;
+  const float desiredRollDeg = rightCommand * flightCommand.maxTiltDeg;
+  const float requestedThrottle = throttleFromNormalizedCommand(zVelocityCommand);
   const float armBlend = clampf(
     static_cast<float>(millis() - armStartMs) / static_cast<float>(ARM_RAMP_MS),
     0.0f,
@@ -866,7 +982,7 @@ void printStatus() {
 
   const bool commandFresh = (millis() - lastCommandRxMs) <= COMMAND_TIMEOUT_MS;
   Serial.printf(
-    "fresh=%d armed=%d ok=%d imu=(%.1f,%.1f,%.1f) mocap=(%.2f,%.2f,%.2f | %.1f) target=(%.2f,%.2f,%.2f | %.1f) motors=(%.2f,%.2f,%.2f,%.2f)\n",
+    "fresh=%d armed=%d ok=%d imu=(%.1f,%.1f,%.1f) mocap=(%.2f,%.2f,%.2f | %.1f) vel=(%.2f,%.2f,%.2f) target=(%.2f,%.2f,%.2f | %.1f) motors=(%.2f,%.2f,%.2f,%.2f)\n",
     commandFresh ? 1 : 0,
     flightCommand.armed ? 1 : 0,
     flightCommand.spatialValid ? 1 : 0,
@@ -877,6 +993,9 @@ void printStatus() {
     flightCommand.position[1],
     flightCommand.position[2],
     flightCommand.rotation[0],
+    flightCommand.velocity[0],
+    flightCommand.velocity[1],
+    flightCommand.velocity[2],
     flightCommand.target[0],
     flightCommand.target[1],
     flightCommand.target[2],

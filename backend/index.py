@@ -1,4 +1,3 @@
-# ... (keeping all imports and other code the same)
 import asyncio
 import base64
 import faulthandler
@@ -39,7 +38,7 @@ EXPECTED_CAMERAS = 2
 MIN_BRIGHTNESS = 50
 MAX_LEDS = 3
 MAX_FIT_ERROR = 0.05
-TRACKING_HZ = 60
+TRACKING_HZ = 30
 SERIAL_REFRESH_SECONDS = 1.0
 SERIAL_RECONNECT_SECONDS = 1.0
 SERIAL_SETTLE_SECONDS = 2.0
@@ -52,21 +51,27 @@ POSITION_JUMP_WEIGHT = 2.0
 PREVIEW_HZ = 5
 MAX_ESP_NOW_PAYLOAD_BYTES = 250
 IMU_LEVEL_CALIBRATION_RETRY_SECONDS = 1.0
+MOTION_STATE_PROCESS_NOISE = 1e-2
+MOTION_STATE_MEASUREMENT_NOISE = 1.0
+MOTION_STATE_ZERO_THRESHOLD = 0.01
+MOTION_STATE_MAX_DT = 0.25
+MOTION_STATE_MAX_ABS_VELOCITY = 2.5
 
 CONTROL_PID_DEFAULTS = {
-    "x": {"kp": 17.5, "ki": 0.0, "kd": 0.5},
-    "y": {"kp": 17.5, "ki": 0.0, "kd": 0.5},
-    "z": {"kp": 0.9, "ki": 0.35, "kd": 0.18},
-    "yaw": {"kp": 4.5, "ki": 0.0, "kd": 0.12},
+    "xyPos": {"kp": 2.0, "ki": 1.0, "kd": 0.0},
+    "zPos": {"kp": 1.5, "ki": 0.0, "kd": 0.0},
+    "yawPos": {"kp": 0.3, "ki": 0.1, "kd": 0.05},
+    "xyVel": {"kp": 0.2, "ki": 0.03, "kd": 0.05},
+    "zVel": {"kp": 0.3, "ki": 0.1, "kd": 0.05},
     "roll": {"kp": 0.022, "ki": 0.0, "kd": 0.0014},
     "pitch": {"kp": 0.022, "ki": 0.0, "kd": 0.0014},
     "yawRate": {"kp": 0.006, "ki": 0.0, "kd": 0.0},
 }
 # Mocap/body frame is +x front, +y left, +z up. A yaw target of 0 deg means
 # the drone's nose should stay aligned with the world +x direction.
-CONTROL_TARGET_DEFAULTS = {"x": 0.0, "y": 0.0, "z": 0.35, "yaw": 0.0}
+CONTROL_TARGET_DEFAULTS = {"x": 0.0, "y": 0.0, "z": 0.25, "yaw": 0.0}
 CONTROL_LIMIT_DEFAULTS = {
-    "hoverThrottle": 0.36,
+    "hoverThrottle": 0.6,
     "minThrottle": 0.18,
     "maxThrottle": 0.82,
     "maxTiltDeg": 12.0,
@@ -86,6 +91,7 @@ DRONE_LED_MODEL = np.array(
 
 DEFAULT_TELEMETRY = {
     "position": {"x": 0.0, "y": 0.0, "z": 0.0},
+    "velocity": {"x": 0.0, "y": 0.0, "z": 0.0},
     "rotation": {"yaw": 0.0, "pitch": 0.0, "roll": 0.0},
     "error": 0.0,
     "mapping_error_px": 0.0,
@@ -168,23 +174,53 @@ def sanitize_limit_config(payload):
 
 
 def compact_numeric(value, digits=4):
-    return round(float(value), digits)
+    rounded = round(float(value), digits)
+    if abs(rounded) < (10 ** -digits):
+        return 0
+
+    integer_value = int(rounded)
+    if math.isclose(rounded, integer_value, abs_tol=10 ** -digits):
+        return integer_value
+
+    # Re-parse a fixed-width decimal string so json.dumps emits the shortest
+    # numeric representation instead of preserving trailing float artifacts.
+    return float(f"{rounded:.{digits}f}".rstrip("0").rstrip("."))
 
 
-def compact_pid_triplet(pid_values):
+def compact_pid_triplet(pid_values, digits=4):
     return [
-        compact_numeric(pid_values["kp"], 4),
-        compact_numeric(pid_values["ki"], 4),
-        compact_numeric(pid_values["kd"], 4),
+        compact_numeric(pid_values["kp"], digits),
+        compact_numeric(pid_values["ki"], digits),
+        compact_numeric(pid_values["kd"], digits),
     ]
 
 
-def compact_pid_bundle(pid_config):
-    ordered_axes = ("x", "y", "z", "yaw", "roll", "pitch", "yawRate")
+def compact_pid_bundle(pid_config, digits=4):
+    ordered_axes = (
+        "xyPos",
+        "zPos",
+        "yawPos",
+        "xyVel",
+        "zVel",
+        "roll",
+        "pitch",
+        "yawRate",
+    )
     values = []
     for axis in ordered_axes:
-        values.extend(compact_pid_triplet(pid_config[axis]))
+        values.extend(compact_pid_triplet(pid_config[axis], digits))
     return values
+
+
+def serialized_payload_size_bytes(payload):
+    return len(
+        json.dumps(
+            payload,
+            separators=(",", ":"),
+            ensure_ascii=True,
+            allow_nan=False,
+        ).encode("utf-8")
+    )
 
 
 def encode_preview_frame(frame, leds=None, labels=None):
@@ -335,6 +371,103 @@ class ScalarKalmanFilter:
         self.error_covariance *= 1.0 - kalman_gain
         
         return self.value
+
+
+class MotionStateKalmanFilter:
+    """
+    Adapted from Low-Cost-Mocap's object-state filter:
+    state = [x, y, z, vx, vy, vz, ax, ay, az]
+    measurement = [x, y, z, vx, vy, vz]
+    """
+
+    def __init__(self):
+        self.kalman = cv.KalmanFilter(9, 6, 0, cv.CV_32F)
+        self.kalman.processNoiseCov = (
+            np.eye(9, dtype=np.float32) * MOTION_STATE_PROCESS_NOISE
+        )
+        self.kalman.measurementNoiseCov = (
+            np.eye(6, dtype=np.float32) * MOTION_STATE_MEASUREMENT_NOISE
+        )
+        self.kalman.measurementMatrix = np.array(
+            [
+                [1, 0, 0, 0, 0, 0, 0, 0, 0],
+                [0, 1, 0, 0, 0, 0, 0, 0, 0],
+                [0, 0, 1, 0, 0, 0, 0, 0, 0],
+                [0, 0, 0, 1, 0, 0, 0, 0, 0],
+                [0, 0, 0, 0, 1, 0, 0, 0, 0],
+                [0, 0, 0, 0, 0, 1, 0, 0, 0],
+            ],
+            dtype=np.float32,
+        )
+        self.reset()
+
+    def _set_transition(self, dt_seconds):
+        dt_seconds = float(dt_seconds)
+        dt_squared = dt_seconds * dt_seconds
+        self.kalman.transitionMatrix = np.array(
+            [
+                [1, 0, 0, dt_seconds, 0, 0, 0.5 * dt_squared, 0, 0],
+                [0, 1, 0, 0, dt_seconds, 0, 0, 0.5 * dt_squared, 0],
+                [0, 0, 1, 0, 0, dt_seconds, 0, 0, 0.5 * dt_squared],
+                [0, 0, 0, 1, 0, 0, dt_seconds, 0, 0],
+                [0, 0, 0, 0, 1, 0, 0, dt_seconds, 0],
+                [0, 0, 0, 0, 0, 1, 0, 0, dt_seconds],
+                [0, 0, 0, 0, 0, 0, 1, 0, 0],
+                [0, 0, 0, 0, 0, 0, 0, 1, 0],
+                [0, 0, 0, 0, 0, 0, 0, 0, 1],
+            ],
+            dtype=np.float32,
+        )
+
+    def reset(self):
+        zero_state = np.zeros((9, 1), dtype=np.float32)
+        self.kalman.statePre = zero_state.copy()
+        self.kalman.statePost = zero_state.copy()
+        self.previous_position = None
+        self.previous_timestamp = None
+        self.initialized = False
+
+    def update(self, position, timestamp=None):
+        timestamp = time.time() if timestamp is None else float(timestamp)
+        position = np.asarray(position, dtype=np.float32).reshape(3)
+
+        if not self.initialized:
+            self.kalman.statePre[:3, 0] = position
+            self.kalman.statePost[:3, 0] = position
+            self.previous_position = position.copy()
+            self.previous_timestamp = timestamp
+            self.initialized = True
+            return position.copy(), np.zeros(3, dtype=np.float32)
+
+        dt_seconds = timestamp - float(self.previous_timestamp)
+        if dt_seconds <= 1e-3 or dt_seconds > MOTION_STATE_MAX_DT:
+            self.kalman.statePre[:3, 0] = position
+            self.kalman.statePost[:3, 0] = position
+            self.kalman.statePre[3:9, 0] = 0.0
+            self.kalman.statePost[3:9, 0] = 0.0
+            self.previous_position = position.copy()
+            self.previous_timestamp = timestamp
+            return position.copy(), np.zeros(3, dtype=np.float32)
+
+        raw_velocity = (position - self.previous_position) / dt_seconds
+        raw_velocity = np.clip(
+            raw_velocity,
+            -MOTION_STATE_MAX_ABS_VELOCITY,
+            MOTION_STATE_MAX_ABS_VELOCITY,
+        ).astype(np.float32)
+
+        self._set_transition(dt_seconds)
+        measurement = np.concatenate((position, raw_velocity)).reshape(6, 1)
+        self.kalman.predict()
+        corrected_state = self.kalman.correct(measurement)[:, 0]
+
+        self.previous_position = position.copy()
+        self.previous_timestamp = timestamp
+
+        filtered_position = corrected_state[:3].astype(np.float32)
+        filtered_velocity = corrected_state[3:6].astype(np.float32)
+        filtered_velocity[np.abs(filtered_velocity) < MOTION_STATE_ZERO_THRESHOLD] = 0.0
+        return filtered_position, filtered_velocity
 
 
 def detect_leds(frame):
@@ -786,12 +919,7 @@ class MotionCaptureEngine:
         self.last_preview_update = 0.0
         self.camera_pose_summary = []
         
-        # Position filters
-        self.position_filters = {
-            "x": ScalarKalmanFilter(1e-4, 2e-3),
-            "y": ScalarKalmanFilter(1e-4, 2e-3),
-            "z": ScalarKalmanFilter(1e-4, 2e-3),
-        }
+        self.motion_state_filter = MotionStateKalmanFilter()
         
         # Attitude filters
         self.attitude_filters = {
@@ -883,13 +1011,12 @@ class MotionCaptureEngine:
         self.last_preview_update = 0.0
         self.camera_pose_summary = []
         
-        for filter_instance in self.position_filters.values():
-            filter_instance.reset()
+        self.motion_state_filter.reset()
         for filter_instance in self.attitude_filters.values():
             filter_instance.reset()
 
     def filter_pose(self, translation, rotation_matrix):
-        """Apply Kalman filtering."""
+        """Filter translation with a pos/vel/accel state model and smooth attitude."""
         yaw_raw, pitch_raw, roll_raw = rotation_matrix_to_euler_zyx(rotation_matrix)
         
         # Unwrap angles
@@ -908,11 +1035,16 @@ class MotionCaptureEngine:
         
         self.last_unwrapped_angles = unwrapped_angles.copy()
         
-        # Filter
+        filtered_position_vector, filtered_velocity_vector = self.motion_state_filter.update(
+            translation
+        )
         filtered_position = {
-            "x": round(self.position_filters["x"].update(float(translation[0])), 4),
-            "y": round(self.position_filters["y"].update(float(translation[1])), 4),
-            "z": round(self.position_filters["z"].update(float(translation[2])), 4),
+            axis: round(float(value), 4)
+            for axis, value in zip(("x", "y", "z"), filtered_position_vector)
+        }
+        filtered_velocity = {
+            axis: round(float(value), 4)
+            for axis, value in zip(("x", "y", "z"), filtered_velocity_vector)
         }
         
         filtered_angles_unwrapped = {
@@ -925,7 +1057,7 @@ class MotionCaptureEngine:
             for axis, value in filtered_angles_unwrapped.items()
         }
         
-        return filtered_position, filtered_angles
+        return filtered_position, filtered_angles, filtered_velocity
 
     def read_pose(self):
         """Main tracking loop."""
@@ -981,8 +1113,10 @@ class MotionCaptureEngine:
         # Check LED detection
         if not all(len(leds) == MAX_LEDS for leds in all_cam_leds_undistorted):
             self.camera_error = "Waiting for all three cameras to detect exactly three LEDs."
+            self.motion_state_filter.reset()
             return {
                 "position": {"x": 0.0, "y": 0.0, "z": 0.0},
+                "velocity": {"x": 0.0, "y": 0.0, "z": 0.0},
                 "rotation": {"yaw": 0.0, "pitch": 0.0, "roll": 0.0},
                 "error": 0.0,
                 "mapping_error_px": 0.0,
@@ -1017,8 +1151,10 @@ class MotionCaptureEngine:
         
         if pose is None:
             self.camera_error = "Pose solve failed or exceeded the fitting threshold."
+            self.motion_state_filter.reset()
             return {
                 "position": {"x": 0.0, "y": 0.0, "z": 0.0},
+                "velocity": {"x": 0.0, "y": 0.0, "z": 0.0},
                 "rotation": {"yaw": 0.0, "pitch": 0.0, "roll": 0.0},
                 "error": (
                     round(float(led_solution["mapping_cost"]), 5)
@@ -1043,9 +1179,13 @@ class MotionCaptureEngine:
         mapping_shifts = pose.pop("mapping_shifts", None)
         if mapping_shifts is None:
             mapping_shifts = [0 for _ in all_cam_leds]
-        filtered_position, filtered_angles = self.filter_pose(translation, raw_rotation)
+        filtered_position, filtered_angles, filtered_velocity = self.filter_pose(
+            translation,
+            raw_rotation,
+        )
         
         pose["position"] = filtered_position
+        pose["velocity"] = filtered_velocity
         pose["rotation"] = filtered_angles
 
         # Relabel preview LEDs using solved semantic ordering: Front, Right, Left.
@@ -1125,40 +1265,93 @@ class ControlServer:
         spatial_data_valid = self.telemetry["spatial_data_valid"]
         drone_index = DEFAULT_DRONE_INDEX
         position = self.telemetry.get("position", {})
+        velocity = self.telemetry.get("velocity", {})
         rotation = self.telemetry.get("rotation", {})
-        # Keep keys short so the full controller frame stays comfortably within
-        # the ESP-NOW payload limit even with non-zero pose and tuning values.
-        serial_payload = {
-            "v": 2,
-            "a": int(self.control.armed),
-            "o": int(spatial_data_valid),
-            "p": [
-                compact_numeric(position.get("x", 0.0), 4),
-                compact_numeric(position.get("y", 0.0), 4),
-                compact_numeric(position.get("z", 0.0), 4),
-            ],
-            "r": [
-                compact_numeric(rotation.get("yaw", 0.0), 2),
-                compact_numeric(rotation.get("pitch", 0.0), 2),
-                compact_numeric(rotation.get("roll", 0.0), 2),
-            ],
-            "g": [
-                compact_numeric(self.control.target["x"], 4),
-                compact_numeric(self.control.target["y"], 4),
-                compact_numeric(self.control.target["z"], 4),
-                compact_numeric(self.control.target["yaw"], 2),
-            ],
-            "u": compact_pid_bundle(self.control.pid),
-            "m": [
-                compact_numeric(self.control.limits["hoverThrottle"], 3),
-                compact_numeric(self.control.limits["minThrottle"], 3),
-                compact_numeric(self.control.limits["maxThrottle"], 3),
-                compact_numeric(self.control.limits["maxTiltDeg"], 1),
-                compact_numeric(self.control.limits["maxYawRateDeg"], 1),
-            ],
-        }
-        if self.is_imu_level_calibration_pending():
-            serial_payload["l"] = int(self.imu_level_calibration_sequence)
+        imu_level_pending = self.is_imu_level_calibration_pending()
+
+        def make_payload(
+            pose_digits,
+            rotation_digits,
+            target_digits,
+            target_yaw_digits,
+            pid_digits,
+            throttle_digits,
+            angle_limit_digits,
+            include_version=True,
+        ):
+            payload = {
+                "a": int(self.control.armed),
+                "o": int(spatial_data_valid),
+                "p": [
+                    compact_numeric(position.get("x", 0.0), pose_digits),
+                    compact_numeric(position.get("y", 0.0), pose_digits),
+                    compact_numeric(position.get("z", 0.0), pose_digits),
+                ],
+                "d": [
+                    compact_numeric(velocity.get("x", 0.0), pose_digits),
+                    compact_numeric(velocity.get("y", 0.0), pose_digits),
+                    compact_numeric(velocity.get("z", 0.0), pose_digits),
+                ],
+                "r": [
+                    compact_numeric(rotation.get("yaw", 0.0), rotation_digits),
+                    compact_numeric(rotation.get("pitch", 0.0), rotation_digits),
+                    compact_numeric(rotation.get("roll", 0.0), rotation_digits),
+                ],
+                "g": [
+                    compact_numeric(self.control.target["x"], target_digits),
+                    compact_numeric(self.control.target["y"], target_digits),
+                    compact_numeric(self.control.target["z"], target_digits),
+                    compact_numeric(self.control.target["yaw"], target_yaw_digits),
+                ],
+                "u": compact_pid_bundle(self.control.pid, pid_digits),
+                "m": [
+                    compact_numeric(self.control.limits["hoverThrottle"], throttle_digits),
+                    compact_numeric(self.control.limits["minThrottle"], throttle_digits),
+                    compact_numeric(self.control.limits["maxThrottle"], throttle_digits),
+                    compact_numeric(self.control.limits["maxTiltDeg"], angle_limit_digits),
+                    compact_numeric(self.control.limits["maxYawRateDeg"], angle_limit_digits),
+                ],
+            }
+            if include_version:
+                payload["v"] = 2
+            if imu_level_pending:
+                payload["l"] = int(self.imu_level_calibration_sequence)
+            return payload
+
+        # Start with the higher-precision payload and only compact further if a
+        # tuned frame would otherwise overflow the ESP-NOW transport limit.
+        serial_payload = make_payload(
+            pose_digits=3,
+            rotation_digits=2,
+            target_digits=3,
+            target_yaw_digits=2,
+            pid_digits=4,
+            throttle_digits=3,
+            angle_limit_digits=1,
+            include_version=True,
+        )
+        if serialized_payload_size_bytes(serial_payload) > MAX_ESP_NOW_PAYLOAD_BYTES:
+            serial_payload = make_payload(
+                pose_digits=2,
+                rotation_digits=1,
+                target_digits=2,
+                target_yaw_digits=1,
+                pid_digits=4,
+                throttle_digits=2,
+                angle_limit_digits=0,
+                include_version=False,
+            )
+        if serialized_payload_size_bytes(serial_payload) > MAX_ESP_NOW_PAYLOAD_BYTES:
+            serial_payload = make_payload(
+                pose_digits=2,
+                rotation_digits=1,
+                target_digits=2,
+                target_yaw_digits=1,
+                pid_digits=3,
+                throttle_digits=2,
+                angle_limit_digits=0,
+                include_version=False,
+            )
         return drone_index, serial_payload
 
     def build_snapshot(self):
