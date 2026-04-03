@@ -1,6 +1,7 @@
 import asyncio
 import base64
 import faulthandler
+import itertools
 import json
 import math
 import sys
@@ -58,7 +59,7 @@ MOTION_STATE_MAX_DT = 0.25
 MOTION_STATE_MAX_ABS_VELOCITY = 2.5
 
 CONTROL_PID_DEFAULTS = {
-    "xyPos": {"kp": 2.0, "ki": 1.0, "kd": 0.0},
+    "xyPos": {"kp": 8.0, "ki": 0.0, "kd": 5.0},
     "zPos": {"kp": 1.5, "ki": 0.0, "kd": 0.0},
     "yawPos": {"kp": 0.3, "ki": 0.1, "kd": 0.05},
     "xyVel": {"kp": 0.2, "ki": 0.03, "kd": 0.05},
@@ -69,7 +70,7 @@ CONTROL_PID_DEFAULTS = {
 }
 # Mocap/body frame is +x front, +y left, +z up. A yaw target of 0 deg means
 # the drone's nose should stay aligned with the world +x direction.
-CONTROL_TARGET_DEFAULTS = {"x": 0.0, "y": 0.0, "z": 0.25, "yaw": 0.0}
+CONTROL_TARGET_DEFAULTS = {"x": 0.0, "y": 0.0, "z": 0.35, "yaw": 0.0}
 CONTROL_LIMIT_DEFAULTS = {
     "hoverThrottle": 0.6,
     "minThrottle": 0.18,
@@ -105,6 +106,7 @@ PREVIEW_WIDTH = 240
 PREVIEW_JPEG_QUALITY = 45
 MAX_LED_REORDER_COST_PIXELS = 50
 MAPPING_TEMPORAL_WEIGHT = 120.0
+SEMANTIC_ROTATION_TEMPORAL_WEIGHT = 1e-4
 
 
 def default_pid_config():
@@ -481,15 +483,19 @@ def detect_leds(frame):
         if moments["m00"] > 2:
             led_candidates.append({
                 "x": moments["m10"] / moments["m00"],
-                "y": moments["m01"] / moments["m00"]
+                "y": moments["m01"] / moments["m00"],
+                "area": float(moments["m00"]),
             })
 
     if len(led_candidates) < MAX_LEDS:
         return [(l["x"], l["y"]) for l in led_candidates]
 
     # 1. Take top 3 by area/intensity if more than 3 found (optional filter)
-    # For now, we assume the 3 brightest blobs are the LEDs
-    top_three = led_candidates[:MAX_LEDS]
+    top_three = sorted(
+        led_candidates,
+        key=lambda candidate: candidate["area"],
+        reverse=True,
+    )[:MAX_LEDS]
 
     # 2. Calculate Centroid of the 3 points
     cx = sum(l["x"] for l in top_three) / MAX_LEDS
@@ -552,6 +558,15 @@ def solve_pose_procrustes(points_3d, model_points):
 def compute_reprojection_error(points_3d, model_points):
     """Compute RMS distance between points."""
     return np.sqrt(np.mean(np.sum((points_3d - model_points)**2, axis=1)))
+
+
+def rotation_matrix_angular_distance_degrees(matrix_a, matrix_b):
+    """Return the shortest rotation angle between two 3x3 rotation matrices."""
+    relative_rotation = np.asarray(matrix_a, dtype=np.float32).T @ np.asarray(
+        matrix_b, dtype=np.float32
+    )
+    cosine = max(-1.0, min(1.0, (np.trace(relative_rotation) - 1.0) * 0.5))
+    return math.degrees(math.acos(cosine))
 
 
 def cyclic_shift(points_2d, shift):
@@ -648,7 +663,7 @@ def find_best_clockwise_mapping(all_cam_leds, proj_mats, previous_led_points=Non
 def solve_led_positions(all_cam_leds, proj_mats, previous_led_points=None):
     """
     Solve LED 3D positions from multi-view geometry only (no drone model usage).
-    Returns mapped observations, mapping quality, and F/R/L 3D coordinates.
+    Returns mapped observations, mapping quality, and unlabeled 3D coordinates.
     """
     mapped_leds, mapping_cost, mapping_shifts, candidate_points = find_best_clockwise_mapping(
         all_cam_leds,
@@ -658,23 +673,50 @@ def solve_led_positions(all_cam_leds, proj_mats, previous_led_points=None):
     if mapped_leds is None:
         return None
 
-    solved_led_coordinates = [
-        {
-            "label": label,
-            "x": round(float(point[0]), 4),
-            "y": round(float(point[1]), 4),
-            "z": round(float(point[2]), 4),
-        }
-        for label, point in zip(["F", "R", "L"], candidate_points)
-    ]
-
     return {
         "mapped_leds": mapped_leds,
         "mapping_cost": float(mapping_cost),
         "mapping_shifts": [int(value) for value in mapping_shifts],
         "candidate_points": candidate_points,
-        "solved_led_coordinates": solved_led_coordinates,
     }
+
+
+def select_best_semantic_pose(candidate_points, previous_rotation=None):
+    """
+    Choose the F/R/L assignment that best matches the asymmetric LED model.
+    A light temporal bias keeps the semantic labels from flipping between frames.
+    """
+    best_solution = None
+    candidate_points = np.asarray(candidate_points, dtype=np.float32)
+
+    for permutation in itertools.permutations(range(MAX_LEDS)):
+        semantic_points = candidate_points[list(permutation)]
+        scale_factor, rotation, translation = solve_pose_procrustes(
+            semantic_points,
+            DRONE_LED_MODEL,
+        )
+        transformed_model = scale_factor * (rotation @ DRONE_LED_MODEL.T).T + translation
+        fit_error = float(compute_reprojection_error(semantic_points, transformed_model))
+        rotation_penalty = 0.0
+        if previous_rotation is not None:
+            rotation_penalty = (
+                SEMANTIC_ROTATION_TEMPORAL_WEIGHT
+                * rotation_matrix_angular_distance_degrees(previous_rotation, rotation)
+            )
+        score = fit_error + rotation_penalty
+
+        if best_solution is None or score < best_solution["score"]:
+            best_solution = {
+                "score": score,
+                "fit_error": fit_error,
+                "scale_factor": scale_factor,
+                "rotation": rotation,
+                "translation": translation,
+                "semantic_permutation": [int(value) for value in permutation],
+                "semantic_points": semantic_points,
+            }
+
+    return best_solution
 
 
 def solve_pose(
@@ -696,21 +738,34 @@ def solve_pose(
     mapping_cost = led_solution["mapping_cost"]
     mapping_shifts = led_solution["mapping_shifts"]
     candidate_points = led_solution["candidate_points"]
-    solved_led_coordinates = led_solution["solved_led_coordinates"]
 
     if mapping_cost >= MAX_LED_REORDER_COST_PIXELS:
         return None
 
-    # Solve for pose using Procrustes alignment
-    scale_factor, rotation, translation = solve_pose_procrustes(candidate_points, DRONE_LED_MODEL)
-
-    # Compute fit error
-    transformed_model = scale_factor * (rotation @ DRONE_LED_MODEL.T).T + translation
-    fit_error = compute_reprojection_error(candidate_points, transformed_model)
+    semantic_pose = select_best_semantic_pose(
+        candidate_points,
+        previous_rotation=previous_rotation,
+    )
+    scale_factor = semantic_pose["scale_factor"]
+    rotation = semantic_pose["rotation"]
+    translation = semantic_pose["translation"]
+    fit_error = semantic_pose["fit_error"]
+    semantic_permutation = semantic_pose["semantic_permutation"]
+    semantic_points = semantic_pose["semantic_points"]
 
     # Check if fit is acceptable
     if fit_error >= MAX_FIT_ERROR:
         return None
+
+    solved_led_coordinates = [
+        {
+            "label": label,
+            "x": round(float(point[0]), 4),
+            "y": round(float(point[1]), 4),
+            "z": round(float(point[2]), 4),
+        }
+        for label, point in zip(["F", "R", "L"], semantic_points)
+    ]
 
     return {
         "position": {
@@ -726,6 +781,8 @@ def solve_pose(
         "scale_factor": round(float(scale_factor), 5),
         "solved_led_coordinates": solved_led_coordinates,
         "mapping_shifts": [int(value) for value in mapping_shifts],
+        "semantic_permutation": [int(value) for value in semantic_permutation],
+        "semantic_led_points": np.asarray(semantic_points, dtype=np.float32),
         "detected_leds_per_camera": [len(leds) for leds in all_cam_leds],
     }
 
@@ -1132,13 +1189,6 @@ class MotionCaptureEngine:
             self.proj_mats,
             previous_led_points=self.last_led_points,
         )
-        solved_led_coordinates = (
-            led_solution["solved_led_coordinates"] if led_solution is not None else []
-        )
-        if led_solution is not None:
-            self.last_led_points = np.asarray(
-                led_solution["candidate_points"], dtype=np.float32
-            ).copy()
 
         # Solve pose
         pose = solve_pose(
@@ -1168,7 +1218,7 @@ class MotionCaptureEngine:
                 ),
                 "model_fit_error_m": 0.0,
                 "scale_factor": 1.0,
-                "solved_led_coordinates": solved_led_coordinates,
+                "solved_led_coordinates": [],
                 "detected_leds_per_camera": [len(leds) for leds in all_cam_leds],
                 "spatial_data_valid": False,
             }
@@ -1177,8 +1227,12 @@ class MotionCaptureEngine:
         raw_rotation = pose.pop("rotation_matrix")
         translation = pose.pop("translation_vector")
         mapping_shifts = pose.pop("mapping_shifts", None)
+        semantic_permutation = pose.pop("semantic_permutation", None)
+        semantic_led_points = pose.pop("semantic_led_points", None)
         if mapping_shifts is None:
             mapping_shifts = [0 for _ in all_cam_leds]
+        if semantic_permutation is None:
+            semantic_permutation = list(range(MAX_LEDS))
         filtered_position, filtered_angles, filtered_velocity = self.filter_pose(
             translation,
             raw_rotation,
@@ -1194,19 +1248,25 @@ class MotionCaptureEngine:
             cyclic_shift(leds, int(shift))
             for leds, shift in zip(all_cam_leds, mapping_shifts)
         ]
+        semantic_raw_leds = [
+            [leds[index] for index in semantic_permutation]
+            for leds in mapped_raw_leds
+        ]
         self.latest_preview_frames = [
             {
                 "camera": f"cam{index + 1}",
                 "image": encode_preview_frame(frame, leds, labels=semantic_labels),
                 "ledCount": len(leds),
             }
-            for index, (frame, leds) in enumerate(zip(selected_frames, mapped_raw_leds))
+            for index, (frame, leds) in enumerate(zip(selected_frames, semantic_raw_leds))
         ]
         self.last_preview_update = now
         
         # Store for next iteration
         self.last_rotation = raw_rotation.copy()
         self.last_translation = translation.copy()
+        if semantic_led_points is not None:
+            self.last_led_points = np.asarray(semantic_led_points, dtype=np.float32).copy()
         
         self.camera_error = ""
         pose["spatial_data_valid"] = True
