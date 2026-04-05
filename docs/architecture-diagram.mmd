@@ -1,0 +1,57 @@
+flowchart LR
+  classDef hardware fill:#FFF3D6,stroke:#C58A00,color:#2B1D00;
+  classDef software fill:#DFF4FF,stroke:#0969DA,color:#0A3069;
+  classDef artifact fill:#F6F8FA,stroke:#57606A,color:#24292F,stroke-dasharray: 5 3;
+
+  subgraph COMPUTER["Computer / Ground Station"]
+    direction TB
+    subgraph C_HW["Hardware"]
+      HOST["Host PC / laptop"]
+      CAMS["2 x PS Eye cameras<br/>(current code configuration)"]
+      S3BOARD["ESP32-S3 relay board<br/>connected over USB"]
+    end
+
+    subgraph C_SW["Software"]
+      FRONTEND["React frontend<br/>operator UI, telemetry, camera previews,<br/>3D scene, PID tuning"]
+      BACKEND["Python backend<br/>ControlServer + MotionCaptureEngine + SerialBridge"]
+      PIPELINE["Pose pipeline<br/>LED detection -> triangulation -> pose solve -><br/>position/attitude filtering"]
+      CAL["Calibration assets<br/>camera_intrinsics.json<br/>camera_extrinsics.json"]
+    end
+  end
+
+  subgraph DRONE["Drone / Airframe"]
+    direction TB
+    subgraph D_HW["Hardware"]
+      S2BOARD["ESP32-S2 control board"]
+      IMU["MPU6050 IMU<br/>I2C"]
+      MOTORS["4 brushed motors<br/>PWM outputs"]
+      FRAME["Drone frame + 3 LED markers<br/>front, back-right, back-left"]
+    end
+
+    subgraph D_SW["Software"]
+      S3FW["ESP32-S3 sender firmware<br/>USB serial RX -> drone index filter -> ESP-NOW TX"]
+      S2FW["ESP32-S2 hover firmware<br/>payload parser + safety gates + IMU level trim +<br/>cascade PID controller + motor mixer"]
+    end
+  end
+
+  HOST -. runs .-> FRONTEND
+  HOST -. runs .-> BACKEND
+  S3BOARD -. runs .-> S3FW
+  S2BOARD -. runs .-> S2FW
+
+  CAMS -->|grayscale frames| PIPELINE
+  CAL --> PIPELINE
+  PIPELINE -->|pose, velocity, yaw,<br/>camera previews, solver status| BACKEND
+
+  FRONTEND -->|WebSocket<br/>set_control / refresh_serial_ports / calibrate_imu_level| BACKEND
+  BACKEND -->|WebSocket<br/>state snapshots| FRONTEND
+  BACKEND -->|USB serial<br/>droneIndex + compact JSON + newline| S3FW
+  S3FW -->|ESP-NOW<br/>compact JSON command| S2FW
+  IMU -->|accel + gyro samples| S2FW
+  S2FW -->|PWM motor commands| MOTORS
+  MOTORS --> FRAME
+  FRAME -. LED observations .-> CAMS
+
+  class HOST,CAMS,S3BOARD,S2BOARD,IMU,MOTORS,FRAME hardware;
+  class FRONTEND,BACKEND,PIPELINE,S3FW,S2FW software;
+  class CAL artifact;

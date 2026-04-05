@@ -2,6 +2,10 @@
 
 This repository contains the `MoCap` project, split into a Python backend, a React frontend, and an ESP32-S3 serial receiver sketch.
 
+## Architecture
+
+See [Architecture Diagram](docs/architecture-diagram.md) for a GitHub-rendered system diagram covering the host computer, cameras, USB/ESP-NOW bridge, and drone-side controller stack.
+
 ## Structure
 
 - `backend/`: motion-capture logic, camera calibration files, and the main tracking server in `index.py`
@@ -14,8 +18,8 @@ This repository contains the `MoCap` project, split into a Python backend, a Rea
 The backend in `backend/index.py` uses OpenCV, NumPy, `pseyepy`, `websockets`, and `pyserial` to:
 
 - load camera intrinsics and extrinsics from `backend/calibration/`
-- verify that all three cameras are connected before allowing transmission
-- detect LED points from the three camera feeds
+- verify that the configured cameras are connected before allowing transmission
+- detect LED points from the configured camera feeds
 - estimate 3D pose from multi-view triangulation
 - accept activation, serial settings, and PID values from the frontend over WebSocket
 - stream `droneIndex + compact JSON + newline` frames to the ESP32-S3 over the selected serial port only when the camera and serial gates are both ready
@@ -63,7 +67,7 @@ Setup notes:
 2. Start the frontend from `frontend/`: `npm run dev`
 3. Connect the ESP32-S3 to the computer over USB
 4. Open the frontend, refresh serial ports, choose the ESP32-S3 COM port, enter PID values, and activate the stream
-5. The backend will only send payloads when all three cameras are connected and pose tracking is ready
+5. The backend will only send payloads when the required cameras are connected and pose tracking is ready
 
 ## Notes
 
