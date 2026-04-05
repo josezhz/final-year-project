@@ -17,8 +17,8 @@ flowchart TB
     direction TB
     HOST["Host PC / laptop"]
     CAMS["2 x PS Eye<br/>cameras"]
-    FRONTEND["React frontend<br/>UI + telemetry"]
-    BACKEND["Python backend<br/>control + serial bridge"]
+    FRONTEND["React frontend<br/>React + Vite<br/>@react-three/fiber + drei"]
+    BACKEND["Python backend<br/>OpenCV + NumPy + pseyepy<br/>websockets + pyserial"]
     PIPELINE["Pose pipeline<br/>detect -> triangulate -> filter"]
     CAL["Calibration JSON<br/>intrinsics + extrinsics"]
 
