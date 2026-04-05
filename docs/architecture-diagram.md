@@ -7,62 +7,54 @@ This diagram reflects the current implementation in the repository:
 - the ESP32-S3 acts as a USB-to-ESP-NOW relay, while the ESP32-S2 runs the onboard hover controller
 
 ```mermaid
-flowchart LR
+flowchart TB
   classDef hardware fill:#FFF3D6,stroke:#C58A00,color:#2B1D00;
   classDef software fill:#DFF4FF,stroke:#0969DA,color:#0A3069;
+  classDef embedded fill:#E8F5E9,stroke:#2DA44E,color:#0F5132;
   classDef artifact fill:#F6F8FA,stroke:#57606A,color:#24292F,stroke-dasharray: 5 3;
 
-  subgraph COMPUTER["Computer / Ground Station"]
+  subgraph GROUND["Ground Station"]
     direction TB
-    subgraph C_HW["Hardware"]
-      HOST["Host PC / laptop"]
-      CAMS["2 x PS Eye cameras<br/>(current code configuration)"]
-      S3BOARD["ESP32-S3 relay board<br/>connected over USB"]
-    end
+    HOST["Host PC / laptop"]
+    CAMS["2 x PS Eye<br/>cameras"]
+    FRONTEND["React frontend<br/>UI + telemetry"]
+    BACKEND["Python backend<br/>control + serial bridge"]
+    PIPELINE["Pose pipeline<br/>detect -> triangulate -> filter"]
+    CAL["Calibration JSON<br/>intrinsics + extrinsics"]
 
-    subgraph C_SW["Software"]
-      FRONTEND["React frontend<br/>operator UI, telemetry, camera previews,<br/>3D scene, PID tuning"]
-      BACKEND["Python backend<br/>ControlServer + MotionCaptureEngine + SerialBridge"]
-      PIPELINE["Pose pipeline<br/>LED detection -> triangulation -> pose solve -><br/>position/attitude filtering"]
-      CAL["Calibration assets<br/>camera_intrinsics.json<br/>camera_extrinsics.json"]
-    end
+    HOST -. hosts .-> FRONTEND
+    HOST -. hosts .-> BACKEND
+    CAMS -->|frames| PIPELINE
+    CAL --> PIPELINE
+    PIPELINE -->|pose + previews| BACKEND
+    FRONTEND -->|WebSocket control| BACKEND
+    BACKEND -->|WebSocket state| FRONTEND
+  end
+
+  subgraph RELAY["USB / Wireless Relay"]
+    direction TB
+    S3RELAY["ESP32-S3 relay<br/>board + firmware<br/>USB serial -> ESP-NOW"]
   end
 
   subgraph DRONE["Drone / Airframe"]
     direction TB
-    subgraph D_HW["Hardware"]
-      S2BOARD["ESP32-S2 control board"]
-      IMU["MPU6050 IMU<br/>I2C"]
-      MOTORS["4 brushed motors<br/>PWM outputs"]
-      FRAME["Drone frame + 3 LED markers<br/>front, back-right, back-left"]
-    end
+    FRAME["Drone frame<br/>3 LED markers"]
+    S2CTRL["ESP32-S2 flight controller<br/>board + firmware<br/>parser + cascaded PID + motor mix"]
+    IMU["MPU6050 IMU"]
+    MOTORS["4 brushed motors"]
 
-    subgraph D_SW["Software"]
-      S3FW["ESP32-S3 sender firmware<br/>USB serial RX -> drone index filter -> ESP-NOW TX"]
-      S2FW["ESP32-S2 hover firmware<br/>payload parser + safety gates + IMU level trim +<br/>cascade PID controller + motor mixer"]
-    end
+    IMU -->|I2C| S2CTRL
+    S2CTRL -->|PWM| MOTORS
+    MOTORS --> FRAME
   end
 
-  HOST -. runs .-> FRONTEND
-  HOST -. runs .-> BACKEND
-  S3BOARD -. runs .-> S3FW
-  S2BOARD -. runs .-> S2FW
+  BACKEND -->|USB serial| S3RELAY
+  S3RELAY -->|ESP-NOW| S2CTRL
+  FRAME -. observed LEDs .-> CAMS
 
-  CAMS -->|grayscale frames| PIPELINE
-  CAL --> PIPELINE
-  PIPELINE -->|pose, velocity, yaw,<br/>camera previews, solver status| BACKEND
-
-  FRONTEND -->|WebSocket<br/>set_control / refresh_serial_ports / calibrate_imu_level| BACKEND
-  BACKEND -->|WebSocket<br/>state snapshots| FRONTEND
-  BACKEND -->|USB serial<br/>droneIndex + compact JSON + newline| S3FW
-  S3FW -->|ESP-NOW<br/>compact JSON command| S2FW
-  IMU -->|accel + gyro samples| S2FW
-  S2FW -->|PWM motor commands| MOTORS
-  MOTORS --> FRAME
-  FRAME -. LED observations .-> CAMS
-
-  class HOST,CAMS,S3BOARD,S2BOARD,IMU,MOTORS,FRAME hardware;
-  class FRONTEND,BACKEND,PIPELINE,S3FW,S2FW software;
+  class HOST,CAMS,IMU,MOTORS,FRAME hardware;
+  class FRONTEND,BACKEND,PIPELINE software;
+  class S3RELAY,S2CTRL embedded;
   class CAL artifact;
 ```
 
@@ -70,8 +62,8 @@ flowchart LR
 
 - `frontend/src/App.jsx`: browser-based operator console for stream control, arming, targets, PID tuning, telemetry, camera previews, and 3D scene view
 - `backend/index.py`: WebSocket server, motion-capture pipeline, state broadcast, serial bridge, and compact control-payload builder
-- `esp32-s3-sender/esp32-s3-sender.ino`: receives `droneIndex + JSON + newline` over USB serial and forwards the JSON body over ESP-NOW
-- `esp32-s2-drone/esp32-s2-drone.ino`: parses the compact command, estimates attitude from the MPU6050, runs the cascaded hover controller, and mixes outputs to four motors
+- `esp32-s3-sender/esp32-s3-sender.ino`: implementation behind the ESP32-S3 relay node that bridges USB serial to ESP-NOW
+- `esp32-s2-drone/esp32-s2-drone.ino`: implementation behind the ESP32-S2 flight-controller node that parses commands, estimates attitude, and drives the motors
 
 ## Reuse
 
