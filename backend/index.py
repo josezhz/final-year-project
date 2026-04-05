@@ -59,24 +59,24 @@ MOTION_STATE_MAX_DT = 0.25
 MOTION_STATE_MAX_ABS_VELOCITY = 2.5
 
 CONTROL_PID_DEFAULTS = {
-    "xyPos": {"kp": 8.0, "ki": 0.0, "kd": 5.0},
+    "xyPos": {"kp": 0.0, "ki": 0.0, "kd": 0.0},
     "zPos": {"kp": 1.5, "ki": 0.0, "kd": 0.0},
-    "yawPos": {"kp": 0.3, "ki": 0.1, "kd": 0.05},
-    "xyVel": {"kp": 0.2, "ki": 0.03, "kd": 0.05},
-    "zVel": {"kp": 0.3, "ki": 0.1, "kd": 0.05},
-    "roll": {"kp": 0.022, "ki": 0.0, "kd": 0.0014},
-    "pitch": {"kp": 0.022, "ki": 0.0, "kd": 0.0014},
+    "yawPos": {"kp": 0.06, "ki": 0.0, "kd": 0.0},
+    "xyVel": {"kp": 0.0, "ki": 0.0, "kd": 0.0},
+    "zVel": {"kp": 0.18, "ki": 0.0, "kd": 0.02},
+    "roll": {"kp": 0.008, "ki": 0.0, "kd": 0.0006},
+    "pitch": {"kp": 0.008, "ki": 0.0, "kd": 0.0006},
     "yawRate": {"kp": 0.006, "ki": 0.0, "kd": 0.0},
 }
 # Mocap/body frame is +x front, +y left, +z up. A yaw target of 0 deg means
 # the drone's nose should stay aligned with the world +x direction.
 CONTROL_TARGET_DEFAULTS = {"x": 0.0, "y": 0.0, "z": 0.35, "yaw": 0.0}
 CONTROL_LIMIT_DEFAULTS = {
-    "hoverThrottle": 0.6,
-    "minThrottle": 0.18,
-    "maxThrottle": 0.82,
-    "maxTiltDeg": 12.0,
-    "maxYawRateDeg": 120.0,
+    "hoverThrottle": 0.65,
+    "minThrottle": 0.30,
+    "maxThrottle": 0.95,
+    "maxTiltDeg": 3.0,
+    "maxYawRateDeg": 25.0,
 }
 
 
@@ -104,7 +104,7 @@ DEFAULT_TELEMETRY = {
 }
 PREVIEW_WIDTH = 240
 PREVIEW_JPEG_QUALITY = 45
-MAX_LED_REORDER_COST_PIXELS = 50
+MAX_LED_REORDER_COST_PIXELS = 75
 MAPPING_TEMPORAL_WEIGHT = 120.0
 SEMANTIC_ROTATION_TEMPORAL_WEIGHT = 1e-4
 

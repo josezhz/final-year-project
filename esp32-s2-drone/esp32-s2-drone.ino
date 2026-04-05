@@ -30,7 +30,11 @@ constexpr float ACCEL_SCALE_LSB_PER_G = 16384.0f;
 constexpr float GYRO_SCALE_LSB_PER_DEG_PER_SEC = 65.5f;
 constexpr float RAD_TO_DEG_F = 57.2957795f;
 constexpr float DEG_TO_RAD_F = 0.0174532925f;
-constexpr float COMPLEMENTARY_ALPHA = 0.98f;
+constexpr float IMU_ANGLE_KALMAN_PROCESS_NOISE = 0.001f;
+constexpr float IMU_ANGLE_KALMAN_BIAS_NOISE = 0.003f;
+constexpr float IMU_ANGLE_KALMAN_MEASUREMENT_NOISE = 0.03f;
+constexpr float IMU_RATE_KALMAN_PROCESS_NOISE = 1.5f;
+constexpr float IMU_RATE_KALMAN_MEASUREMENT_NOISE = 6.0f;
 constexpr float MAX_WORLD_XY_VELOCITY_MPS = 0.8f;
 constexpr float MAX_WORLD_Z_VELOCITY_MPS = 0.5f;
 // Observed IMU mounting on this airframe:
@@ -62,6 +66,28 @@ struct PidState {
   float integral;
   float previousError;
   bool hasPreviousError;
+};
+
+struct ScalarKalmanFilter {
+  float value;
+  float errorCovariance;
+  float processNoise;
+  float measurementNoise;
+  bool initialized;
+};
+
+struct AngleKalmanFilter {
+  float angle;
+  float bias;
+  float rate;
+  float errorCovariance00;
+  float errorCovariance01;
+  float errorCovariance10;
+  float errorCovariance11;
+  float angleProcessNoise;
+  float biasProcessNoise;
+  float measurementNoise;
+  bool initialized;
 };
 
 struct FlightCommand {
@@ -118,6 +144,9 @@ PidState zVelPid = {};
 PidState rollPid = {};
 PidState pitchPid = {};
 PidState yawRatePid = {};
+AngleKalmanFilter rollAngleFilter = {};
+AngleKalmanFilter pitchAngleFilter = {};
+ScalarKalmanFilter yawRateFilter = {};
 
 float motorOutputs[MOTOR_COUNT] = {};
 float gyroBiasX = 0.0f;
@@ -157,6 +186,133 @@ float wrapDegrees(float angle) {
 PidGains makePidGains(float kp, float ki, float kd) {
   PidGains gains = {kp, ki, kd};
   return gains;
+}
+
+void configureScalarKalmanFilter(
+  ScalarKalmanFilter &filter,
+  float processNoise,
+  float measurementNoise
+) {
+  filter.value = 0.0f;
+  filter.errorCovariance = 1.0f;
+  filter.processNoise = processNoise;
+  filter.measurementNoise = measurementNoise;
+  filter.initialized = false;
+}
+
+float updateScalarKalmanFilter(ScalarKalmanFilter &filter, float measurement) {
+  if (!filter.initialized) {
+    filter.value = measurement;
+    filter.errorCovariance = 1.0f;
+    filter.initialized = true;
+    return filter.value;
+  }
+
+  filter.errorCovariance += filter.processNoise;
+  const float innovationCovariance = filter.errorCovariance + filter.measurementNoise;
+  if (innovationCovariance <= 0.0f) {
+    return filter.value;
+  }
+
+  const float kalmanGain = filter.errorCovariance / innovationCovariance;
+  filter.value += kalmanGain * (measurement - filter.value);
+  filter.errorCovariance *= (1.0f - kalmanGain);
+  return filter.value;
+}
+
+void configureAngleKalmanFilter(
+  AngleKalmanFilter &filter,
+  float angleProcessNoise,
+  float biasProcessNoise,
+  float measurementNoise
+) {
+  filter.angle = 0.0f;
+  filter.bias = 0.0f;
+  filter.rate = 0.0f;
+  filter.errorCovariance00 = 1.0f;
+  filter.errorCovariance01 = 0.0f;
+  filter.errorCovariance10 = 0.0f;
+  filter.errorCovariance11 = 1.0f;
+  filter.angleProcessNoise = angleProcessNoise;
+  filter.biasProcessNoise = biasProcessNoise;
+  filter.measurementNoise = measurementNoise;
+  filter.initialized = false;
+}
+
+float updateAngleKalmanFilter(
+  AngleKalmanFilter &filter,
+  float measuredAngleDeg,
+  float measuredRateDegPerSec,
+  float dtSeconds
+) {
+  if (!filter.initialized) {
+    filter.angle = measuredAngleDeg;
+    filter.bias = 0.0f;
+    filter.rate = measuredRateDegPerSec;
+    filter.errorCovariance00 = 1.0f;
+    filter.errorCovariance01 = 0.0f;
+    filter.errorCovariance10 = 0.0f;
+    filter.errorCovariance11 = 1.0f;
+    filter.initialized = true;
+    return filter.angle;
+  }
+
+  if (dtSeconds <= 0.0f) {
+    return filter.angle;
+  }
+
+  filter.rate = measuredRateDegPerSec - filter.bias;
+  filter.angle += dtSeconds * filter.rate;
+
+  filter.errorCovariance00 += dtSeconds * (
+    (dtSeconds * filter.errorCovariance11)
+    - filter.errorCovariance01
+    - filter.errorCovariance10
+    + filter.angleProcessNoise
+  );
+  filter.errorCovariance01 -= dtSeconds * filter.errorCovariance11;
+  filter.errorCovariance10 -= dtSeconds * filter.errorCovariance11;
+  filter.errorCovariance11 += filter.biasProcessNoise * dtSeconds;
+
+  const float innovation = measuredAngleDeg - filter.angle;
+  const float innovationCovariance = filter.errorCovariance00 + filter.measurementNoise;
+  if (innovationCovariance <= 0.0f) {
+    return filter.angle;
+  }
+
+  const float kalmanGain0 = filter.errorCovariance00 / innovationCovariance;
+  const float kalmanGain1 = filter.errorCovariance10 / innovationCovariance;
+  const float errorCovariance00 = filter.errorCovariance00;
+  const float errorCovariance01 = filter.errorCovariance01;
+
+  filter.angle += kalmanGain0 * innovation;
+  filter.bias += kalmanGain1 * innovation;
+  filter.errorCovariance00 -= kalmanGain0 * errorCovariance00;
+  filter.errorCovariance01 -= kalmanGain0 * errorCovariance01;
+  filter.errorCovariance10 -= kalmanGain1 * errorCovariance00;
+  filter.errorCovariance11 -= kalmanGain1 * errorCovariance01;
+
+  return filter.angle;
+}
+
+void resetImuFilters() {
+  configureAngleKalmanFilter(
+    rollAngleFilter,
+    IMU_ANGLE_KALMAN_PROCESS_NOISE,
+    IMU_ANGLE_KALMAN_BIAS_NOISE,
+    IMU_ANGLE_KALMAN_MEASUREMENT_NOISE
+  );
+  configureAngleKalmanFilter(
+    pitchAngleFilter,
+    IMU_ANGLE_KALMAN_PROCESS_NOISE,
+    IMU_ANGLE_KALMAN_BIAS_NOISE,
+    IMU_ANGLE_KALMAN_MEASUREMENT_NOISE
+  );
+  configureScalarKalmanFilter(
+    yawRateFilter,
+    IMU_RATE_KALMAN_PROCESS_NOISE,
+    IMU_RATE_KALMAN_MEASUREMENT_NOISE
+  );
 }
 
 FlightCommand makeDefaultFlightCommand() {
@@ -603,6 +759,7 @@ bool bringUpMpu6050() {
   imuState.gyroXDegPerSec = 0.0f;
   imuState.gyroYDegPerSec = 0.0f;
   imuState.gyroZDegPerSec = 0.0f;
+  resetImuFilters();
   Serial.printf(
     "MPU6050 online on SDA=%u SCL=%u at %lu Hz.\n",
     static_cast<unsigned>(I2C_SDA_PIN),
@@ -703,9 +860,9 @@ bool updateImuEstimate(float dtSeconds) {
   const float bodyRightAccel = accelX;
   const float bodyVerticalAccel = accelZ;
 
-  imuState.gyroXDegPerSec = -sensorGyroYDegPerSec;
-  imuState.gyroYDegPerSec = -sensorGyroXDegPerSec;
-  imuState.gyroZDegPerSec = sensorGyroZDegPerSec;
+  const float bodyGyroXDegPerSec = -sensorGyroYDegPerSec;
+  const float bodyGyroYDegPerSec = -sensorGyroXDegPerSec;
+  const float bodyGyroZDegPerSec = sensorGyroZDegPerSec;
 
   const float rollAccDeg = atan2f(bodyRightAccel, bodyVerticalAccel) * RAD_TO_DEG_F;
   const float pitchAccDeg = atan2f(
@@ -713,16 +870,27 @@ bool updateImuEstimate(float dtSeconds) {
     sqrtf((bodyRightAccel * bodyRightAccel) + (bodyVerticalAccel * bodyVerticalAccel))
   ) * RAD_TO_DEG_F;
 
+  imuState.gyroXDegPerSec = bodyGyroXDegPerSec;
+  imuState.gyroYDegPerSec = bodyGyroYDegPerSec;
+  imuState.gyroZDegPerSec = updateScalarKalmanFilter(yawRateFilter, bodyGyroZDegPerSec);
+
+  imuState.rawRollDeg = updateAngleKalmanFilter(
+    rollAngleFilter,
+    rollAccDeg,
+    bodyGyroXDegPerSec,
+    dtSeconds
+  );
+  imuState.rawPitchDeg = updateAngleKalmanFilter(
+    pitchAngleFilter,
+    pitchAccDeg,
+    bodyGyroYDegPerSec,
+    dtSeconds
+  );
+
   if (!imuState.ready) {
-    imuState.rawRollDeg = rollAccDeg;
-    imuState.rawPitchDeg = pitchAccDeg;
     imuState.yawDeg = 0.0f;
     imuState.ready = true;
   } else {
-    imuState.rawRollDeg = (COMPLEMENTARY_ALPHA * (imuState.rawRollDeg + (imuState.gyroXDegPerSec * dtSeconds)))
-      + ((1.0f - COMPLEMENTARY_ALPHA) * rollAccDeg);
-    imuState.rawPitchDeg = (COMPLEMENTARY_ALPHA * (imuState.rawPitchDeg + (imuState.gyroYDegPerSec * dtSeconds)))
-      + ((1.0f - COMPLEMENTARY_ALPHA) * pitchAccDeg);
     imuState.yawDeg = wrapDegrees(imuState.yawDeg + (imuState.gyroZDegPerSec * dtSeconds));
   }
 
@@ -1009,6 +1177,7 @@ void printStatus() {
 
 void setup() {
   flightCommand = makeDefaultFlightCommand();
+  resetImuFilters();
 
   Serial.begin(USB_BAUD_RATE);
   const unsigned long waitStart = millis();
