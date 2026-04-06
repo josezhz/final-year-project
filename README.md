@@ -6,6 +6,8 @@ This repository contains the `MoCap` project, split into a Python backend, a Rea
 
 See [Architecture Diagram](docs/architecture-diagram.md) for a GitHub-rendered system diagram covering the host computer, cameras, USB/ESP-NOW bridge, and drone-side controller stack.
 
+![System architecture diagram](architecture.png)
+
 ## Structure
 
 - `backend/`: motion-capture logic, camera calibration files, and the main tracking server in `index.py`
