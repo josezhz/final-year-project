@@ -4,8 +4,6 @@ This repository contains the `MoCap` project, split into a Python backend, a Rea
 
 ## Architecture
 
-See [Architecture Diagram](docs/architecture-diagram.md) for a GitHub-rendered system diagram covering the host computer, cameras, USB/ESP-NOW bridge, and drone-side controller stack.
-
 ![System architecture diagram](architecture.png)
 
 ## Structure
