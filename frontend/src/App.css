@@ -509,6 +509,22 @@ button:disabled:hover {
   stroke: #7bdff2;
 }
 
+.chart-line-pitch {
+  stroke: #7bdff2;
+}
+
+.chart-line-roll {
+  stroke: #ffbf69;
+}
+
+.chart-line-pitch-rate {
+  stroke: #a3f7bf;
+}
+
+.chart-line-roll-rate {
+  stroke: #ff6b6b;
+}
+
 .chart-point {
   fill: rgba(239, 247, 246, 0.55);
 }
@@ -517,6 +533,30 @@ button:disabled:hover {
   fill: #eff7f6;
   stroke: rgba(255, 159, 28, 0.75);
   stroke-width: 2;
+}
+
+.chart-point-metric {
+  stroke-width: 2;
+}
+
+.chart-point-pitch {
+  fill: #7bdff2;
+  stroke: rgba(123, 223, 242, 0.3);
+}
+
+.chart-point-roll {
+  fill: #ffbf69;
+  stroke: rgba(255, 191, 105, 0.3);
+}
+
+.chart-point-pitch-rate {
+  fill: #a3f7bf;
+  stroke: rgba(163, 247, 191, 0.3);
+}
+
+.chart-point-roll-rate {
+  fill: #ff6b6b;
+  stroke: rgba(255, 107, 107, 0.28);
 }
 
 .chart-origin {

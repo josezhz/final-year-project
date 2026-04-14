@@ -1,5 +1,7 @@
 import asyncio
 import base64
+import copy
+import csv
 import faulthandler
 import itertools
 import json
@@ -8,6 +10,7 @@ import sys
 import time
 import traceback
 from dataclasses import dataclass, field
+from datetime import datetime
 from http import HTTPStatus
 from pathlib import Path
 
@@ -32,6 +35,7 @@ faulthandler.enable(all_threads=True)
 BASE_DIR = Path(__file__).resolve().parent
 INTRINSICS_PATH = BASE_DIR / "calibration" / "camera_intrinsics.json"
 EXTRINSICS_PATH = BASE_DIR / "calibration" / "camera_extrinsics.json"
+DATA_LOG_DIR = BASE_DIR / "data_logs"
 
 HOST = "localhost"
 PORT = 8765
@@ -39,12 +43,13 @@ EXPECTED_CAMERAS = 2
 MIN_BRIGHTNESS = 50
 MAX_LEDS = 3
 MAX_FIT_ERROR = 0.05
-TRACKING_HZ = 30
+TRACKING_HZ = 60
 SERIAL_REFRESH_SECONDS = 1.0
 SERIAL_RECONNECT_SECONDS = 1.0
 SERIAL_SETTLE_SECONDS = 2.0
 SERIAL_FRAME_TERMINATOR = b"\n"
 SERIAL_MAX_CONSECUTIVE_FAILURES = 3
+SERIAL_IMU_STALE_SECONDS = 0.5
 CAMERA_RETRY_SECONDS = 5.0
 DEFAULT_BAUD_RATE = 1000000
 DEFAULT_DRONE_INDEX = 0
@@ -90,10 +95,19 @@ DRONE_LED_MODEL = np.array(
     dtype=np.float32,
 )
 
+DEFAULT_IMU_TELEMETRY = {
+    "ready": False,
+    "pitch": 0.0,
+    "roll": 0.0,
+    "pitch_rate": 0.0,
+    "roll_rate": 0.0,
+}
+
 DEFAULT_TELEMETRY = {
     "position": {"x": 0.0, "y": 0.0, "z": 0.0},
     "velocity": {"x": 0.0, "y": 0.0, "z": 0.0},
     "rotation": {"yaw": 0.0, "pitch": 0.0, "roll": 0.0},
+    "imu": DEFAULT_IMU_TELEMETRY,
     "error": 0.0,
     "mapping_error_px": 0.0,
     "model_fit_error_m": 0.0,
@@ -107,6 +121,14 @@ PREVIEW_JPEG_QUALITY = 45
 MAX_LED_REORDER_COST_PIXELS = 75
 MAPPING_TEMPORAL_WEIGHT = 120.0
 SEMANTIC_ROTATION_TEMPORAL_WEIGHT = 1e-4
+
+
+def default_imu_telemetry():
+    return copy.deepcopy(DEFAULT_IMU_TELEMETRY)
+
+
+def default_telemetry():
+    return copy.deepcopy(DEFAULT_TELEMETRY)
 
 
 def default_pid_config():
@@ -131,6 +153,25 @@ def coerce_float(value, default=0.0):
         return float(value)
     except (TypeError, ValueError):
         return float(default)
+
+
+def sanitize_imu_telemetry(payload):
+    payload = payload if isinstance(payload, dict) else {}
+    return {
+        "ready": bool(payload.get("ready", False)),
+        "pitch": round(coerce_float(payload.get("pitch"), 0.0), 2),
+        "roll": round(coerce_float(payload.get("roll"), 0.0), 2),
+        "pitch_rate": round(coerce_float(payload.get("pitch_rate"), 0.0), 2),
+        "roll_rate": round(coerce_float(payload.get("roll_rate"), 0.0), 2),
+    }
+
+
+def merge_telemetry(base_telemetry=None, imu_telemetry=None):
+    merged = default_telemetry()
+    if isinstance(base_telemetry, dict):
+        merged.update(copy.deepcopy(base_telemetry))
+    merged["imu"] = sanitize_imu_telemetry(imu_telemetry)
+    return merged
 
 
 def sanitize_pid_config(payload):
@@ -798,6 +839,100 @@ class ControlState:
     pid: dict = field(default_factory=default_pid_config)
 
 
+class ImuDataLogger:
+    def __init__(self, log_dir: Path):
+        self.log_dir = Path(log_dir)
+        self.file_handle = None
+        self.csv_writer = None
+        self.log_path = None
+        self.started_at = 0.0
+
+    def is_active(self):
+        return self.file_handle is not None
+
+    def start(self):
+        if self.is_active():
+            return self.log_path
+
+        self.log_dir.mkdir(parents=True, exist_ok=True)
+        self.started_at = time.time()
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        self.log_path = self.log_dir / f"imu_log_{timestamp}.csv"
+        self.file_handle = self.log_path.open("w", newline="", encoding="utf-8")
+        self.csv_writer = csv.writer(self.file_handle)
+        self.csv_writer.writerow(
+            [
+                "iso_time",
+                "elapsed_s",
+                "imu_ready",
+                "imu_pitch_deg",
+                "imu_roll_deg",
+                "imu_pitch_rate_deg_s",
+                "imu_roll_rate_deg_s",
+                "mocap_valid",
+                "mocap_x_error_m",
+                "mocap_y_error_m",
+                "mocap_z_error_m",
+                "mocap_vx_m_s",
+                "mocap_vy_m_s",
+                "mocap_vz_m_s",
+                "mocap_yaw_error_deg",
+                "mocap_yaw_rate_deg_s",
+            ]
+        )
+        self.file_handle.flush()
+        print(f"IMU logging started: {self.log_path}")
+        return self.log_path
+
+    def log_sample(self, sample, sample_time=None, mocap_sample=None):
+        if not self.is_active():
+            return
+
+        mocap_sample = mocap_sample if isinstance(mocap_sample, dict) else {}
+        sample_time = float(sample_time or time.time())
+        timestamp = datetime.fromtimestamp(sample_time).isoformat(timespec="milliseconds")
+        elapsed = max(0.0, sample_time - self.started_at)
+        self.csv_writer.writerow(
+            [
+                timestamp,
+                f"{elapsed:.3f}",
+                int(bool(sample.get("ready", False))),
+                f"{float(sample.get('pitch', 0.0)):.2f}",
+                f"{float(sample.get('roll', 0.0)):.2f}",
+                f"{float(sample.get('pitch_rate', 0.0)):.2f}",
+                f"{float(sample.get('roll_rate', 0.0)):.2f}",
+                int(bool(mocap_sample.get("valid", False))),
+                f"{float(mocap_sample.get('x_error', 0.0)):.4f}",
+                f"{float(mocap_sample.get('y_error', 0.0)):.4f}",
+                f"{float(mocap_sample.get('z_error', 0.0)):.4f}",
+                f"{float(mocap_sample.get('vx', 0.0)):.4f}",
+                f"{float(mocap_sample.get('vy', 0.0)):.4f}",
+                f"{float(mocap_sample.get('vz', 0.0)):.4f}",
+                f"{float(mocap_sample.get('yaw_error', 0.0)):.2f}",
+                f"{float(mocap_sample.get('yaw_rate', 0.0)):.2f}",
+            ]
+        )
+        self.file_handle.flush()
+
+    def stop(self):
+        if not self.is_active():
+            return None
+
+        log_path = self.log_path
+        try:
+            self.file_handle.close()
+        finally:
+            self.file_handle = None
+            self.csv_writer = None
+            self.log_path = None
+            self.started_at = 0.0
+        print(f"IMU logging stopped: {log_path}")
+        return log_path
+
+    def close(self):
+        return self.stop()
+
+
 class SerialBridge:
     def __init__(self):
         self.connection = None
@@ -809,6 +944,10 @@ class SerialBridge:
         self._last_connect_attempt = 0.0
         self._connected_at = 0.0
         self._consecutive_send_failures = 0
+        self._serial_buffer = bytearray()
+        self.latest_imu = default_imu_telemetry()
+        self._last_imu_received_at = 0.0
+        self.imu_sample_callback = None
 
     def refresh_ports(self, force=False):
         now = time.time()
@@ -861,6 +1000,9 @@ class SerialBridge:
             self.baud_rate = int(baud_rate)
             self._connected_at = time.time()
             self._consecutive_send_failures = 0
+            self._serial_buffer = bytearray()
+            self.latest_imu = default_imu_telemetry()
+            self._last_imu_received_at = 0.0
             self.last_error = ""
             return True
         except Exception as exc:
@@ -868,6 +1010,9 @@ class SerialBridge:
             self.port = ""
             self._connected_at = 0.0
             self._consecutive_send_failures = 0
+            self._serial_buffer = bytearray()
+            self.latest_imu = default_imu_telemetry()
+            self._last_imu_received_at = 0.0
             self.last_error = f"Serial connection failed: {exc}"
             return False
 
@@ -893,20 +1038,76 @@ class SerialBridge:
         self.port = ""
         self._connected_at = 0.0
         self._consecutive_send_failures = 0
+        self._serial_buffer = bytearray()
+        self.latest_imu = default_imu_telemetry()
+        self._last_imu_received_at = 0.0
 
     def is_connected(self):
         return bool(self.connection and self.connection.is_open)
 
-    def drain_input(self):
+    def _handle_incoming_line(self, line):
+        if not line.startswith("!"):
+            return
+
+        try:
+            payload = json.loads(line[1:])
+        except json.JSONDecodeError:
+            return
+
+        if payload.get("t") != "imu":
+            return
+
+        self.latest_imu = sanitize_imu_telemetry(
+            {
+                "ready": payload.get("ready", payload.get("ok", False)),
+                "pitch": payload.get("pitch", payload.get("p", 0.0)),
+                "roll": payload.get("roll", payload.get("r", 0.0)),
+                "pitch_rate": payload.get("pitch_rate", payload.get("pr", 0.0)),
+                "roll_rate": payload.get("roll_rate", payload.get("rr", 0.0)),
+            }
+        )
+        self._last_imu_received_at = time.time()
+        if callable(self.imu_sample_callback):
+            self.imu_sample_callback(copy.deepcopy(self.latest_imu), self._last_imu_received_at)
+
+    def poll_incoming(self):
         if not self.is_connected():
             return
 
         try:
             waiting = getattr(self.connection, "in_waiting", 0)
-            if waiting:
-                self.connection.read(waiting)
-        except Exception:
-            pass
+            if not waiting:
+                return
+
+            chunk = self.connection.read(waiting)
+            if not chunk:
+                return
+
+            self._serial_buffer.extend(chunk)
+            while True:
+                terminator_index = self._serial_buffer.find(SERIAL_FRAME_TERMINATOR)
+                if terminator_index < 0:
+                    if len(self._serial_buffer) > 4096:
+                        self._serial_buffer.clear()
+                    break
+
+                raw_line = bytes(self._serial_buffer[:terminator_index])
+                del self._serial_buffer[: terminator_index + len(SERIAL_FRAME_TERMINATOR)]
+                line = raw_line.decode("utf-8", errors="ignore").strip()
+                if line:
+                    self._handle_incoming_line(line)
+        except Exception as exc:
+            self.last_error = f"Serial read failed: {exc}"
+            self.disconnect()
+
+    def get_latest_imu(self):
+        if (
+            not self.is_connected()
+            or self._last_imu_received_at <= 0.0
+            or (time.time() - self._last_imu_received_at) > SERIAL_IMU_STALE_SECONDS
+        ):
+            return default_imu_telemetry()
+        return copy.deepcopy(self.latest_imu)
 
     def send(self, drone_index, payload):
         if not self.is_connected():
@@ -916,7 +1117,6 @@ class SerialBridge:
             return False
 
         try:
-            self.drain_input()
             serialized_payload = json.dumps(
                 payload,
                 separators=(",", ":"),
@@ -1278,9 +1478,11 @@ class ControlServer:
     def __init__(self):
         self.clients = set()
         self.control = ControlState()
+        self.imu_logger = ImuDataLogger(DATA_LOG_DIR)
         self.serial_bridge = SerialBridge()
+        self.serial_bridge.imu_sample_callback = self.handle_imu_sample
         self.mocap = MotionCaptureEngine()
-        self.telemetry = dict(DEFAULT_TELEMETRY)
+        self.telemetry = default_telemetry()
         self.last_serial_payload = None
         self.last_serial_attempt_payload = None
         self.last_serial_send_ok = False
@@ -1289,7 +1491,69 @@ class ControlServer:
         self.imu_level_calibration_requested_at = 0.0
         self.imu_level_calibration_sent = False
         self.imu_level_calibration_status = ""
+        self.latest_mocap_log_sample = self.build_mocap_log_sample()
+        self.last_mocap_yaw_unwrapped = None
+        self.last_mocap_yaw_timestamp = 0.0
         self.state_lock = asyncio.Lock()
+
+    def build_mocap_log_sample(self, telemetry=None, yaw_rate=0.0):
+        telemetry = telemetry if isinstance(telemetry, dict) else {}
+        position = telemetry.get("position", {})
+        velocity = telemetry.get("velocity", {})
+        rotation = telemetry.get("rotation", {})
+        target = self.control.target if isinstance(self.control.target, dict) else {}
+        x_value = coerce_float(position.get("x"), 0.0)
+        y_value = coerce_float(position.get("y"), 0.0)
+        z_value = coerce_float(position.get("z"), 0.0)
+        yaw_value = coerce_float(rotation.get("yaw"), 0.0)
+        return {
+            "valid": bool(telemetry.get("spatial_data_valid", False)),
+            "x_error": coerce_float(target.get("x"), 0.0) - x_value,
+            "y_error": coerce_float(target.get("y"), 0.0) - y_value,
+            "z_error": coerce_float(target.get("z"), 0.0) - z_value,
+            "vx": coerce_float(velocity.get("x"), 0.0),
+            "vy": coerce_float(velocity.get("y"), 0.0),
+            "vz": coerce_float(velocity.get("z"), 0.0),
+            "yaw_error": wrap_angle_degrees(
+                coerce_float(target.get("yaw"), 0.0) - yaw_value
+            ),
+            "yaw_rate": coerce_float(yaw_rate, 0.0),
+        }
+
+    def update_mocap_log_sample(self, telemetry, sample_time):
+        telemetry = telemetry if isinstance(telemetry, dict) else {}
+        if not telemetry.get("spatial_data_valid", False):
+            self.latest_mocap_log_sample = self.build_mocap_log_sample()
+            self.last_mocap_yaw_unwrapped = None
+            self.last_mocap_yaw_timestamp = 0.0
+            return
+
+        yaw = coerce_float(telemetry.get("rotation", {}).get("yaw"), 0.0)
+        yaw_rate = 0.0
+        if self.last_mocap_yaw_unwrapped is None:
+            yaw_unwrapped = yaw
+        else:
+            yaw_unwrapped = unwrap_angle_degrees(self.last_mocap_yaw_unwrapped, yaw)
+            dt = float(sample_time - self.last_mocap_yaw_timestamp)
+            if 0.0 < dt <= MOTION_STATE_MAX_DT:
+                yaw_rate = (yaw_unwrapped - self.last_mocap_yaw_unwrapped) / dt
+
+        self.last_mocap_yaw_unwrapped = yaw_unwrapped
+        self.last_mocap_yaw_timestamp = float(sample_time)
+        self.latest_mocap_log_sample = self.build_mocap_log_sample(telemetry, yaw_rate)
+
+    def handle_imu_sample(self, sample, sample_time):
+        self.imu_logger.log_sample(
+            sample,
+            sample_time,
+            mocap_sample=self.latest_mocap_log_sample,
+        )
+
+    def sync_imu_logging(self, previous_armed):
+        if self.control.armed and not previous_armed:
+            self.imu_logger.start()
+        elif previous_armed and not self.control.armed:
+            self.imu_logger.stop()
 
     def is_imu_level_calibration_pending(self):
         if self.imu_level_calibration_sequence <= 0:
@@ -1484,6 +1748,7 @@ class ControlServer:
                     control_payload = payload.get("control", {})
                     if not isinstance(control_payload, dict):
                         control_payload = {}
+                    previous_armed = self.control.armed
                     previous_port = self.control.serial_port
                     previous_baud_rate = self.control.baud_rate
                     self.control.active = bool(control_payload.get("active", self.control.active))
@@ -1512,6 +1777,7 @@ class ControlServer:
                         self.serial_bridge.disconnect()
                     elif serial_settings_changed or not self.serial_bridge.is_connected():
                         self.serial_bridge.connect(self.control.serial_port, self.control.baud_rate)
+                    self.sync_imu_logging(previous_armed)
                 elif message_type == "refresh_serial_ports":
                     self.serial_bridge.refresh_ports(force=True)
                 elif message_type == "calibrate_imu_level":
@@ -1557,6 +1823,7 @@ class ControlServer:
                             self.control.serial_port,
                             self.control.baud_rate,
                         )
+                    self.serial_bridge.poll_incoming()
                     try:
                         pose = self.mocap.read_pose()
                     except Exception as exc:
@@ -1566,14 +1833,21 @@ class ControlServer:
                         traceback.print_exc()
 
                     if pose is not None:
-                        self.telemetry = pose
+                        self.telemetry = merge_telemetry(
+                            pose,
+                            self.serial_bridge.get_latest_imu(),
+                        )
+                        self.update_mocap_log_sample(self.telemetry, time.time())
                     else:
-                        self.telemetry = dict(DEFAULT_TELEMETRY)
-
-                    snapshot = self.build_snapshot()
+                        self.telemetry = merge_telemetry(
+                            None,
+                            self.serial_bridge.get_latest_imu(),
+                        )
+                        self.update_mocap_log_sample(self.telemetry, time.time())
                     imu_level_pending = self.is_imu_level_calibration_pending()
                     should_send_serial = (
-                        snapshot["system"]["canSendToEsp32"] or imu_level_pending
+                        (self.control.active and self.serial_bridge.is_connected())
+                        or imu_level_pending
                     )
 
                     if should_send_serial and self.control.serial_port:
@@ -1616,8 +1890,14 @@ class ControlServer:
                             self.last_serial_send_error = (
                                 self.serial_bridge.last_error or "Serial link not connected."
                             )
+                    self.serial_bridge.poll_incoming()
+                    self.telemetry["imu"] = self.serial_bridge.get_latest_imu()
             except Exception as exc:
-                self.telemetry = dict(DEFAULT_TELEMETRY)
+                self.telemetry = merge_telemetry(
+                    None,
+                    self.serial_bridge.get_latest_imu(),
+                )
+                self.update_mocap_log_sample(self.telemetry, time.time())
                 self.mocap.camera_error = f"Tracking loop failed: {exc}"
                 print(f"Tracking loop failed: {exc}")
                 traceback.print_exc()
@@ -1630,6 +1910,7 @@ class ControlServer:
 
     async def close(self):
         self.serial_bridge.disconnect()
+        self.imu_logger.close()
         self.mocap.close()
 
 

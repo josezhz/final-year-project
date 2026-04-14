@@ -21,6 +21,21 @@ void onDataSent(const wifi_tx_info_t *txInfo, esp_now_send_status_t status) {
   (void)status;
 }
 
+void onDataReceived(const esp_now_recv_info_t *recvInfo, const uint8_t *data, int dataLen) {
+  (void)recvInfo;
+  if (data == nullptr || dataLen <= 0) {
+    return;
+  }
+
+  if (data[0] == '!') {
+    Serial.println("IMU RX");
+  }
+  Serial.write(data, static_cast<size_t>(dataLen));
+  if (data[dataLen - 1] != '\n') {
+    Serial.write('\n');
+  }
+}
+
 bool initEspNowPeer() {
   Serial.println("Configuring WiFi station mode...");
   WiFi.mode(WIFI_STA);
@@ -44,6 +59,7 @@ bool initEspNowPeer() {
   }
 
   esp_now_register_send_cb(onDataSent);
+  esp_now_register_recv_cb(onDataReceived);
   Serial.print("ESP-NOW peer added: ");
   for (size_t i = 0; i < sizeof(DRONE_MAC_ADDRESS); i++) {
     if (i > 0) {

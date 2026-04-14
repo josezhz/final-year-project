@@ -1,0 +1,326 @@
+
+<h2 class="sr-only">IMU log dashboard — two datasets with variable-toggling, multi-graph support, and image export</h2>
+
+<style>
+* { box-sizing: border-box; }
+.dash { padding: 1rem 0; font-family: var(--font-sans); }
+.topbar { display: flex; align-items: center; justify-content: space-between; margin-bottom: 1rem; flex-wrap: wrap; gap: 8px; }
+.topbar h1 { font-size: 15px; font-weight: 500; margin: 0; color: var(--color-text-primary); }
+.add-btn { font-size: 13px; padding: 6px 14px; cursor: pointer; border: 0.5px solid var(--color-border-secondary); border-radius: var(--border-radius-md); background: var(--color-background-primary); color: var(--color-text-primary); }
+.add-btn:hover { background: var(--color-background-secondary); }
+.graph-card { background: var(--color-background-primary); border: 0.5px solid var(--color-border-tertiary); border-radius: var(--border-radius-lg); padding: 1rem 1.25rem; margin-bottom: 1rem; }
+.card-header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 10px; flex-wrap: wrap; gap: 8px; }
+.card-left { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.card-right { display: flex; align-items: center; gap: 6px; }
+.ds-select { font-size: 13px; padding: 4px 8px; border: 0.5px solid var(--color-border-secondary); border-radius: var(--border-radius-md); background: var(--color-background-secondary); color: var(--color-text-primary); cursor: pointer; }
+.icon-btn { font-size: 12px; padding: 4px 10px; cursor: pointer; border: 0.5px solid var(--color-border-tertiary); border-radius: var(--border-radius-md); background: transparent; color: var(--color-text-secondary); display: flex; align-items: center; gap: 5px; }
+.icon-btn:hover { background: var(--color-background-secondary); }
+.remove-btn { color: var(--color-text-secondary); }
+.remove-btn:hover { color: var(--color-text-danger); border-color: var(--color-border-danger); }
+.save-btn:hover { color: var(--color-text-info); border-color: var(--color-border-info); }
+.var-pills { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 10px; }
+.pill { font-size: 11px; padding: 3px 9px; border-radius: 100px; cursor: pointer; border: 0.5px solid; user-select: none; transition: opacity 0.15s; }
+.pill.off { opacity: 0.38; }
+.chart-wrap { position: relative; width: 100%; height: 260px; }
+</style>
+
+<div class="dash">
+  <div class="topbar">
+    <h1>IMU log explorer</h1>
+    <button class="add-btn" onclick="addGraph()">+ Add graph</button>
+  </div>
+  <div id="graphs"></div>
+</div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.js"></script>
+<script>
+const DS_A_RAW = `elapsed_s,imu_pitch_deg,imu_roll_deg,imu_pitch_rate_deg_s,imu_roll_rate_deg_s,mocap_x_error_m,mocap_y_error_m,mocap_z_error_m,mocap_vx_m_s,mocap_vy_m_s,mocap_vz_m_s,mocap_yaw_error_deg,mocap_yaw_rate_deg_s
+0.028,0.01,0.00,-7.98,10.71,-0.0087,0.0555,0.2895,0.0000,0.0000,0.0000,3.07,0.32
+0.091,-0.05,0.03,-7.47,11.80,-0.0086,0.0555,0.2895,0.0000,0.0000,0.0000,3.00,0.85
+0.132,-0.15,-0.05,-7.29,10.09,-0.0086,0.0558,0.2891,0.0000,0.0000,0.0000,3.03,0.00
+0.197,-0.34,-0.17,-7.43,9.31,-0.0086,0.0558,0.2896,0.0000,0.0000,0.0000,3.91,-25.46
+0.246,-0.15,0.02,-8.04,13.92,-0.0078,0.0561,0.2897,0.0000,0.0000,0.0000,5.37,-29.98
+0.294,-0.12,0.01,-10.10,14.03,-0.0076,0.0558,0.2899,0.0000,0.0000,0.0000,6.38,-17.53
+0.341,-0.00,0.02,-6.86,11.54,-0.0074,0.0558,0.2900,0.0000,0.0000,0.0000,6.89,-12.01
+0.406,-0.24,-0.03,-6.83,9.10,-0.0065,0.0555,0.2900,0.0000,0.0000,0.0000,10.06,-62.01
+0.502,2.77,-1.00,62.09,26.06,-0.0048,0.0547,0.2897,-0.0139,0.0000,0.0000,14.78,-57.66
+0.551,3.67,1.74,-4.77,76.76,-0.0019,0.0535,0.2884,-0.0289,0.0125,0.0000,17.61,-63.08
+0.656,4.00,4.19,29.87,-60.32,0.0086,0.0519,0.2832,-0.0698,0.0140,0.0288,23.43,-56.80
+0.719,3.93,-1.92,1.12,-109.47,0.0255,0.0515,0.2746,-0.1481,0.0000,0.0784,27.55,-45.13
+0.784,2.45,-4.21,-44.49,-88.92,0.0595,0.0441,0.2690,0.0000,0.0000,0.0000,30.35,0.00
+0.827,0.48,-9.08,-29.55,-73.18,0.0703,0.0416,0.2689,-0.0891,0.0205,0.0000,31.77,-32.10
+0.877,-1.26,-7.82,-30.28,58.35,0.0826,0.0394,0.2702,-0.1434,0.0264,0.0000,33.08,-29.06
+0.922,-2.73,3.01,57.06,115.17,0.1019,0.0350,0.2845,-0.2268,0.0438,-0.1020,35.53,-63.33
+0.977,3.14,3.04,89.76,16.79,0.1248,0.0313,0.2962,-0.2882,0.0487,-0.1246,38.20,-43.08
+1.029,3.86,0.37,-30.19,-73.52,0.1468,0.0249,0.2997,-0.3213,0.0674,-0.0920,40.27,-57.60
+1.084,-1.40,-1.04,-194.42,26.65,0.1734,0.0134,0.3107,-0.3829,0.1194,-0.1370,42.80,-51.11
+1.128,-3.16,2.21,-4.98,74.01,0.1971,0.0065,0.3182,-0.4211,0.1243,-0.1421,45.35,-55.74
+1.178,-1.51,3.16,31.12,-20.05,0.2348,-0.0032,0.3165,-0.0364,0.0122,0.0000,48.28,-75.92
+1.238,-0.10,-2.48,-141.14,-63.97,0.0000,0.0000,0.3500,0.0000,0.0000,0.0000,0.00,0.00
+1.288,0.38,-0.59,-2.80,15.71,0.0000,0.0000,0.3500,0.0000,0.0000,0.0000,0.00,0.00
+1.330,2.23,1.51,-11.72,-1.18,0.0000,0.0000,0.3500,0.0000,0.0000,0.0000,0.00,0.00
+1.381,4.02,3.55,-10.71,10.33,0.0000,0.0000,0.3500,0.0000,0.0000,0.0000,0.00,0.00
+1.432,5.46,5.23,-5.69,14.30,0.0000,0.0000,0.3500,0.0000,0.0000,0.0000,0.00,0.00
+1.481,5.31,5.47,-6.65,10.61,0.0000,0.0000,0.3500,0.0000,0.0000,0.0000,0.00,0.00
+1.531,4.53,4.72,-8.72,10.65,0.0000,0.0000,0.3500,0.0000,0.0000,0.0000,0.00,0.00
+1.584,3.79,4.02,-7.99,10.62,0.0000,0.0000,0.3500,0.0000,0.0000,0.0000,0.00,0.00
+1.627,3.34,3.57,-8.16,10.77,0.0000,0.0000,0.3500,0.0000,0.0000,0.0000,0.00,0.00`;
+
+const DS_B_RAW = `elapsed_s,imu_pitch_deg,imu_roll_deg,imu_pitch_rate_deg_s,imu_roll_rate_deg_s,mocap_x_error_m,mocap_y_error_m,mocap_z_error_m,mocap_vx_m_s,mocap_vy_m_s,mocap_vz_m_s,mocap_yaw_error_deg,mocap_yaw_rate_deg_s
+0.024,-0.00,-0.01,-7.91,10.68,-0.0053,0.0680,0.2896,0.0000,0.0000,0.0000,1.59,-0.42
+0.090,0.02,0.04,-7.46,9.84,-0.0054,0.0680,0.2896,0.0000,0.0000,0.0000,1.58,-1.48
+0.128,-0.07,0.04,-7.29,10.71,-0.0054,0.0680,0.2896,0.0000,0.0000,0.0000,1.57,0.24
+0.184,-0.13,-0.24,0.56,7.10,-0.0054,0.0681,0.2897,0.0000,0.0000,0.0000,1.71,-3.72
+0.236,-0.16,-0.08,-1.64,7.42,-0.0048,0.0679,0.2897,0.0000,0.0000,0.0000,2.85,-27.11
+0.289,-0.02,-0.09,-6.10,14.73,-0.0045,0.0682,0.2898,0.0000,0.0000,0.0000,4.05,-19.28
+0.334,-0.19,0.08,-15.32,9.80,-0.0044,0.0681,0.2898,0.0000,0.0000,0.0000,5.06,-23.66
+0.407,-0.28,0.00,-2.59,13.11,-0.0038,0.0683,0.2899,0.0000,0.0000,0.0000,7.83,-38.62
+0.454,0.08,0.12,11.37,7.98,-0.0031,0.0681,0.2900,0.0000,0.0000,0.0000,9.94,-53.89
+0.503,0.69,0.47,-0.31,16.12,-0.0021,0.0678,0.2892,-0.0127,0.0000,0.0000,11.91,-39.56
+0.553,0.93,0.12,22.89,5.31,-0.0004,0.0671,0.2878,-0.0202,0.0000,0.0135,14.48,-37.34
+0.605,3.13,-0.47,42.05,98.23,0.0023,0.0664,0.2855,-0.0300,0.0000,0.0233,16.88,-48.58
+0.656,2.90,2.91,-35.17,28.93,0.0069,0.0658,0.2820,-0.0499,0.0000,0.0387,20.22,-68.85
+0.724,-0.60,0.14,-61.90,-86.66,0.0172,0.0638,0.2771,-0.0913,0.0179,0.0507,24.52,-45.67
+0.771,-3.25,-5.54,-72.94,-124.11,0.0260,0.0614,0.2729,-0.1186,0.0277,0.0616,26.53,-45.38
+0.821,-4.70,-9.24,-51.50,-26.32,0.0354,0.0581,0.2686,-0.1419,0.0412,0.0699,28.61,-55.77
+0.866,-5.60,-5.59,-17.61,55.61,0.0437,0.0559,0.2619,-0.1508,0.0424,0.0923,30.65,-40.95
+0.965,-5.02,-1.04,0.51,98.56,0.0608,0.0450,0.2580,-0.1604,0.0787,0.0637,35.85,-64.98
+0.968,-2.75,3.05,62.89,61.55,0.0608,0.0450,0.2580,-0.1604,0.0787,0.0637,35.85,-64.98
+1.038,1.76,3.63,69.90,46.44,0.0708,0.0348,0.2576,-0.1496,0.1036,0.0390,39.83,-49.46
+1.091,4.46,4.44,50.79,42.99,0.0773,0.0270,0.2582,-0.1444,0.1187,0.0255,42.45,-43.84
+1.138,6.05,4.21,44.28,21.78,0.0828,0.0209,0.2589,-0.1396,0.1222,0.0155,43.69,-26.74
+1.190,5.90,3.37,-11.85,31.39,0.0952,0.0091,0.2605,-0.1752,0.1515,0.0000,47.54,-67.73
+1.238,4.37,4.60,15.64,71.83,0.1119,-0.0054,0.2688,-0.2344,0.1982,-0.0423,50.34,-64.71
+1.285,4.32,6.43,6.89,69.03,0.1279,-0.0145,0.2700,-0.2703,0.1925,-0.0279,52.60,-53.79
+1.359,2.70,6.22,-49.08,-3.13,0.1636,-0.0330,0.2796,-0.3734,0.2186,-0.0638,55.53,-29.73
+1.406,-1.56,0.95,-106.83,-130.29,0.2025,-0.0538,0.2958,-0.5123,0.2847,-0.1447,57.60,-38.65
+1.459,-7.85,-8.91,-175.99,-206.10,0.2420,-0.0708,0.3065,-0.6017,0.3018,-0.1611,59.06,-29.54
+1.508,-13.48,-16.78,-113.32,3.22,0.2835,-0.0865,0.3155,-0.6703,0.3041,-0.1611,60.29,-29.59
+1.558,-15.36,-5.48,-112.80,309.94,0.3272,-0.0991,0.3211,-0.7372,0.2965,-0.1546,62.20,-43.04
+1.604,-14.40,7.26,70.21,185.45,0.3717,-0.1061,0.3239,-0.8125,0.2613,-0.1362,64.03,-36.38
+1.656,-4.11,9.48,194.53,-75.79,0.0000,0.0000,0.3500,0.0000,0.0000,0.0000,0.00,0.00
+1.696,5.64,0.09,209.93,-190.86,0.0000,0.0000,0.3500,0.0000,0.0000,0.0000,0.00,0.00
+1.763,13.75,-9.89,216.62,-239.73,0.0000,0.0000,0.3500,0.0000,0.0000,0.0000,0.00,0.00
+1.799,6.75,-2.85,-335.35,477.31,0.0000,0.0000,0.3500,0.0000,0.0000,0.0000,0.00,0.00
+1.865,-2.51,6.50,-206.28,3.78,0.0000,0.0000,0.3500,0.0000,0.0000,0.0000,0.00,0.00
+1.914,0.00,0.00,0.00,0.00,0.0000,0.0000,0.3500,0.0000,0.0000,0.0000,0.00,0.00
+1.960,-2.53,10.50,-9.44,9.86,0.0000,0.0000,0.3500,0.0000,0.0000,0.0000,0.00,0.00
+2.015,-1.96,12.54,-5.08,11.83,0.0000,0.0000,0.3500,0.0000,0.0000,0.0000,0.00,0.00
+2.064,-1.29,14.52,-7.24,10.04,0.0000,0.0000,0.3500,0.0000,0.0000,0.0000,0.00,0.00
+2.113,-0.75,14.96,-7.00,8.97,0.0000,0.0000,0.3500,0.0000,0.0000,0.0000,0.00,0.00
+2.162,-0.66,12.46,-8.46,10.71,0.0000,0.0000,0.3500,0.0000,0.0000,0.0000,0.00,0.00
+2.263,-0.40,8.71,-7.76,11.43,0.0000,0.0000,0.3500,0.0000,0.0000,0.0000,0.00,0.00
+2.313,-0.31,7.11,-7.56,10.59,0.0000,0.0000,0.3500,0.0000,0.0000,0.0000,0.00,0.00
+2.379,-0.25,5.76,-7.85,10.61,0.0000,0.0000,0.3500,0.0000,0.0000,0.0000,0.00,0.00`;
+
+function parseCSV(raw) {
+  const lines = raw.trim().split('\n');
+  const headers = lines[0].split(',');
+  return lines.slice(1).map(l => {
+    const vals = l.split(',');
+    const obj = {};
+    headers.forEach((h,i) => { obj[h.trim()] = parseFloat(vals[i]); });
+    return obj;
+  });
+}
+
+const DATASETS = {
+  A: { label: 'Log 16:13:32', rows: parseCSV(DS_A_RAW) },
+  B: { label: 'Log 16:17:55', rows: parseCSV(DS_B_RAW) }
+};
+
+const VARIABLES = [
+  { key: 'imu_pitch_deg', label: 'pitch (°)', group: 'IMU', hex: '#378ADD' },
+  { key: 'imu_roll_deg', label: 'roll (°)', group: 'IMU', hex: '#D4537E' },
+  { key: 'imu_pitch_rate_deg_s', label: 'pitch rate (°/s)', group: 'IMU', hex: '#1D9E75' },
+  { key: 'imu_roll_rate_deg_s', label: 'roll rate (°/s)', group: 'IMU', hex: '#BA7517' },
+  { key: 'mocap_x_error_m', label: 'x error (m)', group: 'MoCap', hex: '#7F77DD' },
+  { key: 'mocap_y_error_m', label: 'y error (m)', group: 'MoCap', hex: '#D85A30' },
+  { key: 'mocap_z_error_m', label: 'z error (m)', group: 'MoCap', hex: '#639922' },
+  { key: 'mocap_vx_m_s', label: 'vx (m/s)', group: 'MoCap', hex: '#E24B4A' },
+  { key: 'mocap_vy_m_s', label: 'vy (m/s)', group: 'MoCap', hex: '#888780' },
+  { key: 'mocap_vz_m_s', label: 'vz (m/s)', group: 'MoCap', hex: '#185FA5' },
+  { key: 'mocap_yaw_error_deg', label: 'yaw error (°)', group: 'MoCap', hex: '#993556' },
+  { key: 'mocap_yaw_rate_deg_s', label: 'yaw rate (°/s)', group: 'MoCap', hex: '#3B6D11' },
+];
+
+let graphCount = 0;
+const graphs = {};
+
+function saveGraph(id) {
+  const { chart, dsKey, enabledVars } = graphs[id];
+  const canvas = document.getElementById('canvas-' + id);
+
+  // Build a composite canvas with white background + legend
+  const vars = VARIABLES.filter(v => enabledVars.has(v.key));
+  const legendH = vars.length > 0 ? 28 : 0;
+  const padding = 16;
+  const exportCanvas = document.createElement('canvas');
+  exportCanvas.width = canvas.width;
+  exportCanvas.height = canvas.height + legendH + padding * 2;
+  const ectx = exportCanvas.getContext('2d');
+
+  // White background
+  ectx.fillStyle = '#ffffff';
+  ectx.fillRect(0, 0, exportCanvas.width, exportCanvas.height);
+
+  // Title
+  const dsLabel = DATASETS[dsKey].label;
+  ectx.fillStyle = '#333333';
+  ectx.font = '500 13px sans-serif';
+  ectx.fillText('IMU log — ' + dsLabel, padding, padding - 2);
+
+  // Chart image
+  ectx.drawImage(canvas, 0, padding);
+
+  // Legend row
+  if (vars.length > 0) {
+    let x = padding;
+    const y = canvas.height + padding + 18;
+    ectx.font = '11px sans-serif';
+    vars.forEach(v => {
+      ectx.fillStyle = v.hex;
+      ectx.fillRect(x, y - 9, 10, 10);
+      ectx.fillStyle = '#444444';
+      ectx.fillText(v.label, x + 14, y);
+      x += ectx.measureText(v.label).width + 28;
+    });
+  }
+
+  const varNames = vars.length > 0
+    ? vars.map(v => v.key.replace(/[^a-z0-9]/gi, '_')).slice(0, 3).join('-')
+    : 'graph';
+  const filename = `imu_${dsKey}_${varNames}_graph${id}.png`;
+
+  const link = document.createElement('a');
+  link.download = filename;
+  link.href = exportCanvas.toDataURL('image/png');
+  link.click();
+}
+
+function addGraph(dsKey = 'A') {
+  const id = ++graphCount;
+  const enabledVars = new Set(['imu_pitch_deg', 'imu_roll_deg']);
+
+  const card = document.createElement('div');
+  card.className = 'graph-card';
+  card.id = 'graph-' + id;
+
+  card.innerHTML = `
+    <div class="card-header">
+      <div class="card-left">
+        <span style="font-size:13px;font-weight:500;color:var(--color-text-secondary)">Graph ${id}</span>
+        <select class="ds-select" onchange="changeDataset(${id}, this.value)">
+          <option value="A" ${dsKey==='A'?'selected':''}>Log 16:13:32</option>
+          <option value="B" ${dsKey==='B'?'selected':''}>Log 16:17:55</option>
+        </select>
+      </div>
+      <div class="card-right">
+        <button class="icon-btn save-btn" onclick="saveGraph(${id})" title="Save as PNG">
+          <svg width="13" height="13" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg"><path d="M8 1v9m0 0L5 7m3 3 3-3M2 12v1.5A1.5 1.5 0 003.5 15h9a1.5 1.5 0 001.5-1.5V12" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/></svg>
+          Save PNG
+        </button>
+        ${id > 1 ? `<button class="icon-btn remove-btn" onclick="removeGraph(${id})">Remove</button>` : ''}
+      </div>
+    </div>
+    <div class="var-pills" id="pills-${id}"></div>
+    <div class="chart-wrap"><canvas id="canvas-${id}" role="img" aria-label="IMU time-series chart"></canvas></div>
+  `;
+
+  document.getElementById('graphs').appendChild(card);
+  renderPills(id, enabledVars);
+
+  const ctx = document.getElementById('canvas-' + id).getContext('2d');
+  const chart = new Chart(ctx, {
+    type: 'line',
+    data: { labels: [], datasets: [] },
+    options: {
+      responsive: true,
+      maintainAspectRatio: false,
+      animation: false,
+      interaction: { mode: 'index', intersect: false },
+      plugins: {
+        legend: { display: false },
+        tooltip: {
+          callbacks: { label: ctx => `${ctx.dataset.label}: ${ctx.parsed.y.toFixed(3)}` }
+        }
+      },
+      scales: {
+        x: {
+          ticks: { font: { size: 11 }, color: '#888', maxTicksLimit: 8 },
+          grid: { color: 'rgba(128,128,128,0.12)' },
+          title: { display: true, text: 'elapsed (s)', font: { size: 11 }, color: '#888' }
+        },
+        y: {
+          ticks: { font: { size: 11 }, color: '#888' },
+          grid: { color: 'rgba(128,128,128,0.12)' }
+        }
+      }
+    }
+  });
+
+  graphs[id] = { chart, dsKey, enabledVars };
+  updateChart(id);
+}
+
+function renderPills(id, enabledVars) {
+  const container = document.getElementById('pills-' + id);
+  container.innerHTML = '';
+  let lastGroup = null;
+  VARIABLES.forEach(v => {
+    if (v.group !== lastGroup) {
+      const sep = document.createElement('span');
+      sep.style.cssText = 'font-size:10px;color:var(--color-text-tertiary);padding:3px 2px;align-self:center;';
+      sep.textContent = v.group;
+      container.appendChild(sep);
+      lastGroup = v.group;
+    }
+    const pill = document.createElement('span');
+    pill.className = 'pill' + (enabledVars.has(v.key) ? '' : ' off');
+    pill.textContent = v.label;
+    pill.style.cssText = `background:${v.hex}22;color:${v.hex};border-color:${v.hex}55;`;
+    pill.onclick = () => toggleVar(id, v.key, pill);
+    container.appendChild(pill);
+  });
+}
+
+function toggleVar(id, key, pill) {
+  const g = graphs[id];
+  if (g.enabledVars.has(key)) { g.enabledVars.delete(key); pill.classList.add('off'); }
+  else { g.enabledVars.add(key); pill.classList.remove('off'); }
+  updateChart(id);
+}
+
+function changeDataset(id, dsKey) {
+  graphs[id].dsKey = dsKey;
+  updateChart(id);
+}
+
+function updateChart(id) {
+  const { chart, dsKey, enabledVars } = graphs[id];
+  const rows = DATASETS[dsKey].rows;
+  const labels = rows.map(r => r.elapsed_s.toFixed(3));
+  const datasets = VARIABLES
+    .filter(v => enabledVars.has(v.key))
+    .map(v => ({
+      label: v.label,
+      data: rows.map(r => r[v.key]),
+      borderColor: v.hex,
+      backgroundColor: v.hex + '18',
+      borderWidth: 1.5,
+      pointRadius: rows.length > 40 ? 0 : 2,
+      tension: 0.2,
+    }));
+  chart.data.labels = labels;
+  chart.data.datasets = datasets;
+  chart.update();
+}
+
+function removeGraph(id) {
+  graphs[id].chart.destroy();
+  delete graphs[id];
+  document.getElementById('graph-' + id).remove();
+}
+
+addGraph('A');
+</script>

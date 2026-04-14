@@ -7,6 +7,7 @@ const EMPTY_TELEMETRY = {
   position: { x: 0, y: 0, z: 0 },
   velocity: { x: 0, y: 0, z: 0 },
   rotation: { yaw: 0, pitch: 0, roll: 0 },
+  imu: { ready: false, pitch: 0, roll: 0, pitch_rate: 0, roll_rate: 0 },
   error: 0,
   mapping_error_px: 0,
   model_fit_error_m: 0,
@@ -90,6 +91,30 @@ function buildLinePath(points, getX, getY) {
   return points
     .map((point, index) => `${index === 0 ? 'M' : 'L'} ${getX(point).toFixed(2)} ${getY(point).toFixed(2)}`)
     .join(' ');
+}
+
+function buildTimeScaleX(samples, padding, innerWidth) {
+  return (timestamp) => {
+    if (!samples.length) {
+      return padding;
+    }
+    const first = samples[0].t;
+    return padding + ((timestamp - first) / TRAJECTORY_WINDOW_MS) * innerWidth;
+  };
+}
+
+function computeSymmetricDomain(samples, series, fallbackAbsMax = 1) {
+  const observedAbsMax = samples.reduce((maxValue, sample) => (
+    Math.max(
+      maxValue,
+      ...series.map((item) => Math.abs(Number(item.getSampleValue(sample) ?? 0))),
+    )
+  ), 0);
+  const absMax = Math.max(fallbackAbsMax, observedAbsMax * 1.15, 0.001);
+  return {
+    min: -absMax,
+    max: absMax,
+  };
 }
 
 function toScenePoint([x, y, z]) {
@@ -416,13 +441,7 @@ function ZTimelineChart({ samples, telemetry }) {
   const domainMax = 1;
   const latest = samples.at(-1);
 
-  const scaleX = (timestamp) => {
-    if (!samples.length) {
-      return padding;
-    }
-    const first = samples[0].t;
-    return padding + ((timestamp - first) / TRAJECTORY_WINDOW_MS) * innerWidth;
-  };
+  const scaleX = buildTimeScaleX(samples, padding, innerWidth);
   const scaleY = (value) => height - padding - ((value - domainMin) / (domainMax - domainMin || 1)) * innerHeight;
   const path = buildLinePath(samples, (sample) => scaleX(sample.t), (sample) => scaleY(sample.z));
 
@@ -512,11 +531,192 @@ function ZTimelineChart({ samples, telemetry }) {
   );
 }
 
+function DualMetricTimelineChart({
+  samples,
+  telemetryValues,
+  headingLabel,
+  title,
+  ariaLabel,
+  statusLabel,
+  yLabel,
+  fallbackAbsMax,
+  series,
+}) {
+  const width = 520;
+  const height = 320;
+  const padding = 34;
+  const innerWidth = width - padding * 2;
+  const innerHeight = height - padding * 2;
+  const latest = samples.at(-1);
+  const domain = computeSymmetricDomain(samples, series, fallbackAbsMax);
+  const scaleX = buildTimeScaleX(samples, padding, innerWidth);
+  const scaleY = (value) => height - padding - ((value - domain.min) / (domain.max - domain.min || 1)) * innerHeight;
+
+  return (
+    <div className="chart-card">
+      <div className="chart-heading">
+        <div>
+          <span className="meta-label">{headingLabel}</span>
+          <strong>{title}</strong>
+        </div>
+        <span className="chart-window">{statusLabel}</span>
+      </div>
+
+      <svg viewBox={`0 0 ${width} ${height}`} className="chart-svg" role="img" aria-label={ariaLabel}>
+        <rect x="0" y="0" width={width} height={height} rx="20" className="chart-backdrop" />
+        <line x1={padding} y1={scaleY(0)} x2={width - padding} y2={scaleY(0)} className="chart-axis chart-axis-origin" />
+        <line x1={padding} y1={padding} x2={padding} y2={height - padding} className="chart-axis" />
+
+        {[0.25, 0.5, 0.75].map((fraction) => (
+          <g key={fraction}>
+            <line
+              x1={padding}
+              y1={padding + innerHeight * fraction}
+              x2={width - padding}
+              y2={padding + innerHeight * fraction}
+              className="chart-grid"
+            />
+            <line
+              x1={padding + innerWidth * fraction}
+              y1={padding}
+              x2={padding + innerWidth * fraction}
+              y2={height - padding}
+              className="chart-grid"
+            />
+          </g>
+        ))}
+
+        {series.map((item) => {
+          const path = buildLinePath(
+            samples,
+            (sample) => scaleX(sample.t),
+            (sample) => scaleY(item.getSampleValue(sample)),
+          );
+
+          return path ? <path key={item.key} d={path} className={`chart-line ${item.lineClassName}`} /> : null;
+        })}
+
+        {latest ? series.map((item) => (
+          <circle
+            key={item.key}
+            cx={scaleX(latest.t)}
+            cy={scaleY(item.getSampleValue(latest))}
+            r={4.5}
+            className={`chart-point chart-point-metric ${item.pointClassName}`}
+          />
+        )) : null}
+
+        <text x={width - padding} y={height - 8} textAnchor="end" className="chart-label">
+          Time (-3.0 s to now)
+        </text>
+        <text x="16" y={padding - 10} className="chart-label">
+          {yLabel} ({formatNumber(domain.min, 1)} to {formatNumber(domain.max, 1)})
+        </text>
+      </svg>
+
+      <div className="chart-readout">
+        {series.map((item) => (
+          <div key={item.key}>
+            <span className="meta-label">{item.label}</span>
+            <strong>
+              {formatNumber(item.getTelemetryValue(telemetryValues), item.digits)}
+              {' '}
+              {item.unit}
+            </strong>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function ImuAttitudeChart({ samples, telemetry }) {
+  const imuSamples = samples.filter((sample) => sample.imuReady);
+  const imu = telemetry.imu ?? {};
+
+  return (
+    <DualMetricTimelineChart
+      samples={imuSamples}
+      telemetryValues={imu}
+      headingLabel="Drone IMU"
+      title="Pitch / roll"
+      ariaLabel="Drone IMU pitch and roll over time"
+      statusLabel={imu.ready ? 'Drone IMU live' : 'Awaiting drone IMU'}
+      yLabel="Deg"
+      fallbackAbsMax={8}
+      series={[
+        {
+          key: 'pitch',
+          label: 'Pitch',
+          unit: 'deg',
+          digits: 2,
+          lineClassName: 'chart-line-pitch',
+          pointClassName: 'chart-point-pitch',
+          getSampleValue: (sample) => sample.pitch,
+          getTelemetryValue: (values) => Number(values.pitch ?? 0),
+        },
+        {
+          key: 'roll',
+          label: 'Roll',
+          unit: 'deg',
+          digits: 2,
+          lineClassName: 'chart-line-roll',
+          pointClassName: 'chart-point-roll',
+          getSampleValue: (sample) => sample.roll,
+          getTelemetryValue: (values) => Number(values.roll ?? 0),
+        },
+      ]}
+    />
+  );
+}
+
+function ImuRateChart({ samples, telemetry }) {
+  const imuSamples = samples.filter((sample) => sample.imuReady);
+  const imu = telemetry.imu ?? {};
+
+  return (
+    <DualMetricTimelineChart
+      samples={imuSamples}
+      telemetryValues={imu}
+      headingLabel="Drone IMU"
+      title="Pitch / roll rate"
+      ariaLabel="Drone IMU pitch rate and roll rate over time"
+      statusLabel={imu.ready ? 'Gyro rates live' : 'Awaiting drone IMU'}
+      yLabel="Deg/s"
+      fallbackAbsMax={40}
+      series={[
+        {
+          key: 'pitchRate',
+          label: 'Pitch rate',
+          unit: 'deg/s',
+          digits: 2,
+          lineClassName: 'chart-line-pitch-rate',
+          pointClassName: 'chart-point-pitch-rate',
+          getSampleValue: (sample) => sample.pitchRate,
+          getTelemetryValue: (values) => Number(values.pitch_rate ?? 0),
+        },
+        {
+          key: 'rollRate',
+          label: 'Roll rate',
+          unit: 'deg/s',
+          digits: 2,
+          lineClassName: 'chart-line-roll-rate',
+          pointClassName: 'chart-point-roll-rate',
+          getSampleValue: (sample) => sample.rollRate,
+          getTelemetryValue: (values) => Number(values.roll_rate ?? 0),
+        },
+      ]}
+    />
+  );
+}
+
 function TrajectoryPanel({ telemetry, samples }) {
   return (
     <div className="trajectory-layout">
       <XYTrajectoryChart samples={samples} telemetry={telemetry} />
       <ZTimelineChart samples={samples} telemetry={telemetry} />
+      <ImuAttitudeChart samples={samples} telemetry={telemetry} />
+      <ImuRateChart samples={samples} telemetry={telemetry} />
     </div>
   );
 }
@@ -684,6 +884,7 @@ function App() {
       if (payload.type !== 'state') {
         return;
       }
+      const imu = payload.telemetry.imu ?? {};
 
       setTelemetry(payload.telemetry);
       setSystem(payload.system);
@@ -698,6 +899,11 @@ function App() {
             x: Number(payload.telemetry.position?.x ?? 0),
             y: Number(payload.telemetry.position?.y ?? 0),
             z: Number(payload.telemetry.position?.z ?? 0),
+            pitch: Number(imu.pitch ?? 0),
+            roll: Number(imu.roll ?? 0),
+            pitchRate: Number(imu.pitch_rate ?? 0),
+            rollRate: Number(imu.roll_rate ?? 0),
+            imuReady: Boolean(imu.ready),
           },
         ].filter((sample) => now - sample.t <= TRAJECTORY_WINDOW_MS);
 

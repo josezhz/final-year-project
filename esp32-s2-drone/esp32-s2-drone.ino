@@ -8,6 +8,7 @@ constexpr unsigned long USB_BAUD_RATE = 115200;
 constexpr size_t MAX_PAYLOAD_LENGTH = 251;
 constexpr unsigned long SERIAL_WAIT_MS = 2000;
 constexpr unsigned long STATUS_PRINT_INTERVAL_MS = 1000;
+constexpr unsigned long IMU_TELEMETRY_INTERVAL_MS = 50;
 constexpr unsigned long COMMAND_TIMEOUT_MS = 250;
 constexpr unsigned long ARM_RAMP_MS = 450;
 constexpr unsigned long IMU_REINIT_RETRY_MS = 1000;
@@ -16,6 +17,7 @@ constexpr unsigned long IMU_ERROR_LOG_INTERVAL_MS = 1000;
 constexpr uint8_t I2C_SDA_PIN = 11;
 constexpr uint8_t I2C_SCL_PIN = 10;
 constexpr uint8_t MPU6050_ADDRESS = 0x68;
+uint8_t BRIDGE_MAC_ADDRESS[] = {0x50, 0x78, 0x7D, 0x19, 0x9D, 0xF0};
 constexpr uint32_t I2C_FREQUENCY_HZ = 100000;
 constexpr uint16_t I2C_TIMEOUT_MS = 20;
 constexpr uint8_t I2C_TRANSACTION_RETRIES = 3;
@@ -589,6 +591,9 @@ bool parseFlightCommandPayload(const char *payload, FlightCommand &nextCommand) 
 
 void onDataReceived(const esp_now_recv_info_t *recvInfo, const uint8_t *data, int dataLen) {
   (void)recvInfo;
+  if (data == nullptr || dataLen <= 0) {
+    return;
+  }
 
   const size_t copyLength = min(static_cast<size_t>(dataLen), sizeof(pendingPayload) - 1);
   portENTER_CRITICAL_ISR(&payloadMux);
@@ -609,6 +614,61 @@ bool pullPendingPayload(char *buffer, size_t bufferSize) {
   }
   portEXIT_CRITICAL(&payloadMux);
   return hasPayload;
+}
+
+bool ensureBridgePeerRegistered(uint8_t *peerMac, size_t peerMacLength) {
+  if (peerMac == nullptr || peerMacLength < sizeof(BRIDGE_MAC_ADDRESS)) {
+    return false;
+  }
+  memcpy(peerMac, BRIDGE_MAC_ADDRESS, sizeof(BRIDGE_MAC_ADDRESS));
+  if (esp_now_is_peer_exist(peerMac)) {
+    return true;
+  }
+
+  esp_now_peer_info_t peerInfo = {};
+  memcpy(peerInfo.peer_addr, peerMac, sizeof(BRIDGE_MAC_ADDRESS));
+  peerInfo.channel = 0;
+  peerInfo.encrypt = false;
+  return esp_now_add_peer(&peerInfo) == ESP_OK;
+}
+
+void sendImuTelemetry() {
+  static unsigned long lastImuTelemetryMs = 0;
+  if ((millis() - lastImuTelemetryMs) < IMU_TELEMETRY_INTERVAL_MS) {
+    return;
+  }
+  lastImuTelemetryMs = millis();
+
+  uint8_t peerMac[6] = {};
+  if (!ensureBridgePeerRegistered(peerMac, sizeof(peerMac))) {
+    return;
+  }
+
+  const float reportedRollDeg = imuState.ready ? imuState.rollDeg : 0.0f;
+  const float reportedPitchDeg = imuState.ready ? imuState.pitchDeg : 0.0f;
+  const float reportedRollRateDegPerSec = imuState.ready ? imuState.gyroXDegPerSec : 0.0f;
+  const float reportedPitchRateDegPerSec = imuState.ready ? imuState.gyroYDegPerSec : 0.0f;
+
+  char payload[96] = {};
+  const int payloadLength = snprintf(
+    payload,
+    sizeof(payload),
+    "!{\"t\":\"imu\",\"ok\":%d,\"r\":%.2f,\"p\":%.2f,\"rr\":%.2f,\"pr\":%.2f}",
+    imuState.ready ? 1 : 0,
+    reportedRollDeg,
+    reportedPitchDeg,
+    reportedRollRateDegPerSec,
+    reportedPitchRateDegPerSec
+  );
+  if (payloadLength <= 0 || payloadLength >= static_cast<int>(sizeof(payload))) {
+    return;
+  }
+
+  esp_now_send(
+    peerMac,
+    reinterpret_cast<const uint8_t *>(payload),
+    static_cast<size_t>(payloadLength)
+  );
 }
 
 bool initEspNowReceiver() {
@@ -1221,6 +1281,7 @@ void loop() {
     runHoverController(dtSeconds);
   }
 
+  sendImuTelemetry();
   printStatus();
   delay(2);
 }
