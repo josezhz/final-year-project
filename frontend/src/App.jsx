@@ -75,6 +75,10 @@ const EMPTY_SYSTEM = {
   imuLevelCalibrationSent: false,
   imuLevelCalibrationSequence: 0,
   imuLevelCalibrationStatus: '',
+  loggingActive: false,
+  loggingStatus: '',
+  metricsLogPath: '',
+  imuLogPath: '',
 };
 
 const TRAJECTORY_WINDOW_MS = 3000;
@@ -999,6 +1003,10 @@ function App() {
     sendMessage({ type: 'calibrate_imu_level' });
   };
 
+  const toggleLoggingSession = () => {
+    sendMessage({ type: 'toggle_logging_session' });
+  };
+
   const isDirty = JSON.stringify(localControl) !== JSON.stringify(serverControl);
   const livePosition = {
     x: Number(telemetry.position?.x ?? 0),
@@ -1054,6 +1062,20 @@ function App() {
       ? 'No IMU level calibration has been sent yet this session.'
       : 'Apply a serial port selection before sending the IMU level request.'
   );
+  const loggingSessionTone = system.loggingActive
+    ? 'ready'
+    : connectionState === 'Connected'
+      ? 'pending'
+      : 'blocked';
+  const loggingSessionLabel = system.loggingActive ? 'Logging active' : 'Logging idle';
+  const loggingSessionStatus = system.loggingStatus || (
+    connectionState === 'Connected'
+      ? 'Click start logging session to begin recording one combined session CSV with metrics and IMU traces. Arming also starts logging automatically, and disarming stops it.'
+      : 'Reconnect the frontend before starting a logging session.'
+  );
+  const latestMetricsLogName = system.metricsLogPath
+    ? system.metricsLogPath.split(/[/\\]/).pop()
+    : 'Not started';
   const gateCards = [
     {
       label: 'Frontend link',
@@ -1384,6 +1406,39 @@ function App() {
             </div>
 
             <div className="control-stack">
+              <div className="subsection-card">
+                <div className="subsection-head">
+                  <span className="meta-label">Logging session</span>
+                  <strong>Manual start and stop</strong>
+                </div>
+                <p className="axis-copy">
+                  Start a session when you are ready to record report data, or just arm the drone
+                  and let logging begin automatically. Disarming ends the session, and the same
+                  button still lets you start or stop logging manually.
+                </p>
+                <div className="action-row">
+                  <button
+                    className={`toggle-button ${system.loggingActive ? 'active' : ''}`}
+                    onClick={toggleLoggingSession}
+                    disabled={connectionState !== 'Connected'}
+                  >
+                    {system.loggingActive ? 'Stop logging session' : 'Start logging session'}
+                  </button>
+                  <span className={`pill ${loggingSessionTone}`}>{loggingSessionLabel}</span>
+                </div>
+                <p className="hint">{loggingSessionStatus}</p>
+                <div className="system-list compact">
+                  <div>
+                    <span>Session log</span>
+                    <strong>{latestMetricsLogName}</strong>
+                  </div>
+                  <div>
+                    <span>IMU fields</span>
+                    <strong>Included in session CSV</strong>
+                  </div>
+                </div>
+              </div>
+
               <div className="subsection-card">
                 <div className="subsection-head">
                   <span className="meta-label">Target pose</span>

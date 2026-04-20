@@ -1,0 +1,375 @@
+
+<h2 class="sr-only">IMU / session metrics dashboard — import any CSV, multi-graph with variable toggling, time range, Y-axis range, and PNG export</h2>
+
+<style>
+* { box-sizing: border-box; }
+.dash { padding: 1rem 0; font-family: var(--font-sans); }
+.topbar { display: flex; align-items: center; justify-content: space-between; margin-bottom: 1rem; flex-wrap: wrap; gap: 8px; }
+.topbar h1 { font-size: 15px; font-weight: 500; margin: 0; color: var(--color-text-primary); }
+.topbar-right { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.btn { font-size: 13px; padding: 6px 14px; cursor: pointer; border: 0.5px solid var(--color-border-secondary); border-radius: var(--border-radius-md); background: var(--color-background-primary); color: var(--color-text-primary); display: inline-flex; align-items: center; gap: 6px; }
+.btn:hover { background: var(--color-background-secondary); }
+.btn-primary { border-color: #378ADD55; color: #378ADD; }
+.btn-primary:hover { background: #378ADD11; }
+.graph-card { background: var(--color-background-primary); border: 0.5px solid var(--color-border-tertiary); border-radius: var(--border-radius-lg); padding: 1rem 1.25rem; margin-bottom: 1rem; }
+.card-header { display: flex; align-items: flex-start; justify-content: space-between; margin-bottom: 10px; flex-wrap: wrap; gap: 8px; }
+.card-left { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.card-right { display: flex; align-items: center; gap: 6px; }
+.ds-select { font-size: 13px; padding: 4px 8px; border: 0.5px solid var(--color-border-secondary); border-radius: var(--border-radius-md); background: var(--color-background-secondary); color: var(--color-text-primary); cursor: pointer; max-width: 200px; }
+.icon-btn { font-size: 12px; padding: 4px 10px; cursor: pointer; border: 0.5px solid var(--color-border-tertiary); border-radius: var(--border-radius-md); background: transparent; color: var(--color-text-secondary); display: flex; align-items: center; gap: 5px; }
+.icon-btn:hover { background: var(--color-background-secondary); }
+.save-btn:hover { color: #378ADD; border-color: #378ADD55; }
+.remove-btn:hover { color: #E24B4A; border-color: #E24B4A55; }
+.var-group { margin-bottom: 8px; }
+.var-group-label { font-size: 10px; color: var(--color-text-tertiary); margin-bottom: 4px; text-transform: uppercase; letter-spacing: 0.04em; }
+.var-pills { display: flex; flex-wrap: wrap; gap: 5px; }
+.pill { font-size: 11px; padding: 3px 9px; border-radius: 100px; cursor: pointer; border: 0.5px solid; user-select: none; transition: opacity 0.15s; }
+.pill.off { opacity: 0.35; }
+.chart-wrap { position: relative; width: 100%; height: 240px; }
+.drop-zone { border: 1.5px dashed var(--color-border-secondary); border-radius: var(--border-radius-lg); padding: 2.5rem 1.5rem; text-align: center; color: var(--color-text-secondary); font-size: 13px; cursor: pointer; transition: background 0.15s; margin-bottom: 1rem; }
+.drop-zone:hover, .drop-zone.drag-over { background: var(--color-background-secondary); }
+.drop-zone svg { display: block; margin: 0 auto 10px; opacity: 0.4; }
+.empty-hint { font-size: 12px; color: var(--color-text-tertiary); margin-top: 6px; }
+#file-input { display: none; }
+.axis-row { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; flex-wrap: wrap; }
+.axis-label { font-size: 11px; color: var(--color-text-tertiary); white-space: nowrap; min-width: 60px; }
+.axis-input { width: 80px; font-size: 12px; padding: 3px 7px; border: 0.5px solid var(--color-border-secondary); border-radius: var(--border-radius-md); background: var(--color-background-secondary); color: var(--color-text-primary); text-align: center; }
+.axis-input:focus { outline: none; border-color: #378ADD88; box-shadow: 0 0 0 2px #378ADD22; }
+.axis-reset { font-size: 11px; padding: 3px 8px; cursor: pointer; border: 0.5px solid var(--color-border-tertiary); border-radius: var(--border-radius-md); background: transparent; color: var(--color-text-tertiary); }
+.axis-reset:hover { color: var(--color-text-secondary); background: var(--color-background-secondary); }
+.axis-sep { font-size: 12px; color: var(--color-text-tertiary); }
+.range-track-wrap { flex: 1; min-width: 160px; position: relative; height: 20px; display: flex; align-items: center; }
+.range-track { position: absolute; left: 0; right: 0; height: 4px; background: var(--color-border-secondary); border-radius: 2px; pointer-events: none; }
+.range-fill { position: absolute; height: 4px; background: #378ADD88; border-radius: 2px; pointer-events: none; }
+.range-thumb { position: absolute; width: 100%; height: 20px; -webkit-appearance: none; appearance: none; background: transparent; pointer-events: none; margin: 0; }
+.range-thumb::-webkit-slider-thumb { -webkit-appearance: none; width: 14px; height: 14px; border-radius: 50%; background: #378ADD; border: 2px solid white; box-shadow: 0 0 0 1px #378ADD88; cursor: pointer; pointer-events: all; }
+.range-thumb::-moz-range-thumb { width: 14px; height: 14px; border-radius: 50%; background: #378ADD; border: 2px solid white; cursor: pointer; pointer-events: all; }
+</style>
+
+<div class="dash">
+  <div class="topbar">
+    <h1>IMU / session log explorer</h1>
+    <div class="topbar-right">
+      <button class="btn btn-primary" onclick="document.getElementById('file-input').click()">
+        <svg width="13" height="13" viewBox="0 0 16 16" fill="none"><path d="M8 1v9m0-9L5 4m3-3 3 3M2 12v1.5A1.5 1.5 0 003.5 15h9a1.5 1.5 0 001.5-1.5V12" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/></svg>
+        Import CSV
+      </button>
+      <button class="btn" onclick="addGraph()" id="add-graph-btn" style="display:none">+ Add graph</button>
+    </div>
+  </div>
+  <input type="file" id="file-input" accept=".csv" multiple onchange="handleFileInput(this.files)">
+
+  <div id="drop-zone" class="drop-zone" onclick="document.getElementById('file-input').click()"
+    ondragover="event.preventDefault();this.classList.add('drag-over')"
+    ondragleave="this.classList.remove('drag-over')"
+    ondrop="event.preventDefault();this.classList.remove('drag-over');handleFileInput(event.dataTransfer.files)">
+    <svg width="28" height="28" viewBox="0 0 24 24" fill="none"><path d="M12 2v12m0-12L8 6m4-4 4 4M3 16v2a3 3 0 003 3h12a3 3 0 003-3v-2" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>
+    Drop CSV files here, or click to import
+    <div class="empty-hint">Supports any CSV with a numeric time column. Import multiple files to compare.</div>
+  </div>
+
+  <div id="graphs"></div>
+</div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.js"></script>
+<script>
+const PALETTE = ['#378ADD','#D4537E','#1D9E75','#BA7517','#7F77DD','#D85A30','#639922','#E24B4A','#888780','#185FA5','#993556','#3B6D11','#0F6E56','#993C1D','#534AB7','#5F5E5A','#3C3489','#712B13'];
+const datasets = {};
+let graphCount = 0, dsColorIdx = 0;
+const graphs = {};
+
+function parseCSVText(text, filename) {
+  const lines = text.trim().split(/\r?\n/);
+  if (lines.length < 2) return null;
+  const headers = lines[0].split(',').map(h => h.trim());
+  const rows = lines.slice(1).map(l => {
+    const vals = l.split(','), obj = {};
+    headers.forEach((h,i) => { obj[h] = vals[i] !== undefined ? vals[i].trim() : ''; });
+    return obj;
+  });
+  const timeCol = headers.find(h => h==='elapsed_s'||h.includes('elapsed')||h.includes('time_s')||h.endsWith('_s'))
+    || headers.find(h => !isNaN(parseFloat(rows[0][h])));
+  const numericCols = headers.filter(h => {
+    if (h==='iso_time'||h===timeCol) return false;
+    const v = rows.slice(0,10).map(r=>parseFloat(r[h]));
+    return v.filter(x=>!isNaN(x)).length >= v.length*0.7;
+  });
+  const timeVals = rows.map(r=>parseFloat(r[timeCol])).filter(v=>!isNaN(v));
+  return { filename, rows, timeCol, numericCols, groups: groupColumns(numericCols),
+    tMin: Math.min(...timeVals), tMax: Math.max(...timeVals) };
+}
+
+function groupColumns(cols) {
+  const m = {};
+  cols.forEach(c => {
+    const p = c.split('_');
+    const k = p.length>=3 ? p.slice(0,2).join('_') : p[0];
+    if (!m[k]) m[k]=[];
+    m[k].push(c);
+  });
+  const g = {};
+  Object.entries(m).forEach(([k,cs]) => { g[k.replace(/_/g,' ')]=cs; });
+  return g;
+}
+
+function colColor(col, dsId) {
+  const ds = datasets[dsId];
+  if (!ds._cc) ds._cc={};
+  if (!ds._cc[col]) ds._cc[col]=PALETTE[Object.keys(ds._cc).length%PALETTE.length];
+  return ds._cc[col];
+}
+
+function handleFileInput(files) {
+  Array.from(files).forEach(f => { const r=new FileReader(); r.onload=e=>importDataset(e.target.result,f.name); r.readAsText(f); });
+}
+
+function importDataset(text, filename) {
+  const parsed = parseCSVText(text, filename);
+  if (!parsed) { alert('Could not parse '+filename); return; }
+  const id = 'ds_'+Date.now()+'_'+Math.random().toString(36).slice(2,6);
+  const shortName = filename.replace(/\.csv$/i,'').slice(-28);
+  datasets[id] = {...parsed, id, shortName, color: PALETTE[dsColorIdx++%PALETTE.length]};
+  document.getElementById('drop-zone').style.display='none';
+  document.getElementById('add-graph-btn').style.display='';
+  if (Object.keys(graphs).length===0) addGraph(id);
+  else Object.keys(graphs).forEach(gid=>refreshDsSelect(parseInt(gid)));
+}
+
+function refreshDsSelect(gid) {
+  const sel=document.getElementById('ds-sel-'+gid); if(!sel) return;
+  const cur=graphs[gid].dsId;
+  sel.innerHTML=Object.values(datasets).map(d=>`<option value="${d.id}" ${d.id===cur?'selected':''}>${d.shortName}</option>`).join('');
+}
+
+function addGraph(dsId) {
+  const keys=Object.keys(datasets); if(!keys.length) return;
+  const id=++graphCount;
+  dsId=dsId||keys[0];
+  const ds=datasets[dsId];
+  const enabledCols=new Set((ds.numericCols||[]).slice(0,3));
+
+  const card=document.createElement('div');
+  card.className='graph-card'; card.id='graph-'+id;
+  card.innerHTML=`
+    <div class="card-header">
+      <div class="card-left">
+        <span style="font-size:13px;font-weight:500;color:var(--color-text-secondary)">Graph ${id}</span>
+        <select class="ds-select" id="ds-sel-${id}" onchange="changeDataset(${id},this.value)">
+          ${Object.values(datasets).map(d=>`<option value="${d.id}" ${d.id===dsId?'selected':''}>${d.shortName}</option>`).join('')}
+        </select>
+      </div>
+      <div class="card-right">
+        <button class="icon-btn save-btn" onclick="saveGraph(${id})">
+          <svg width="13" height="13" viewBox="0 0 16 16" fill="none"><path d="M8 1v9m0 0L5 7m3 3 3-3M2 12v1.5A1.5 1.5 0 003.5 15h9a1.5 1.5 0 001.5-1.5V12" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/></svg>
+          Save PNG
+        </button>
+        ${id>1?`<button class="icon-btn remove-btn" onclick="removeGraph(${id})">Remove</button>`:''}
+      </div>
+    </div>
+    <div id="trange-${id}" class="axis-row"></div>
+    <div id="yrange-${id}" class="axis-row"></div>
+    <div id="pills-${id}"></div>
+    <div class="chart-wrap"><canvas id="canvas-${id}" role="img" aria-label="Time-series chart"></canvas></div>
+  `;
+  document.getElementById('graphs').appendChild(card);
+  graphs[id]={dsId, enabledCols, chart:null, tStart:ds.tMin, tEnd:ds.tMax, yMin:null, yMax:null};
+  renderTimeRange(id);
+  renderYRange(id);
+  renderPills(id);
+  buildChart(id);
+}
+
+function renderTimeRange(id) {
+  const g=graphs[id], ds=datasets[g.dsId];
+  const tMin=ds.tMin, tMax=ds.tMax, step=((tMax-tMin)/1000).toFixed(4);
+  const c=document.getElementById('trange-'+id);
+  c.innerHTML=`
+    <span class="axis-label">X (time)</span>
+    <input class="axis-input" id="ts-${id}" type="number" step="${step}" min="${tMin}" max="${tMax}" value="${g.tStart.toFixed(3)}" onchange="onTimeInput(${id})">
+    <span class="axis-sep">–</span>
+    <input class="axis-input" id="te-${id}" type="number" step="${step}" min="${tMin}" max="${tMax}" value="${g.tEnd.toFixed(3)}" onchange="onTimeInput(${id})">
+    <span style="font-size:11px;color:var(--color-text-tertiary)">s</span>
+    <div class="range-track-wrap">
+      <div class="range-track"></div>
+      <div class="range-fill" id="tfill-${id}"></div>
+      <input type="range" class="range-thumb" id="tsl-${id}" min="${tMin}" max="${tMax}" step="${step}" value="${g.tStart}" oninput="onTimeSlider(${id})">
+      <input type="range" class="range-thumb" id="ter-${id}" min="${tMin}" max="${tMax}" step="${step}" value="${g.tEnd}" oninput="onTimeSlider(${id})">
+    </div>
+    <button class="axis-reset" onclick="resetTime(${id})">Reset</button>
+  `;
+  updateTimeFill(id);
+}
+
+function renderYRange(id) {
+  const g=graphs[id];
+  const c=document.getElementById('yrange-'+id);
+  c.innerHTML=`
+    <span class="axis-label">Y (value)</span>
+    <input class="axis-input" id="ymi-${id}" type="number" placeholder="auto" value="${g.yMin!==null?g.yMin:''}" oninput="onYInput(${id})" style="color:${g.yMin!==null?'var(--color-text-primary)':'var(--color-text-tertiary)'}">
+    <span class="axis-sep">–</span>
+    <input class="axis-input" id="yma-${id}" type="number" placeholder="auto" value="${g.yMax!==null?g.yMax:''}" oninput="onYInput(${id})" style="color:${g.yMax!==null?'var(--color-text-primary)':'var(--color-text-tertiary)'}">
+    <button class="axis-reset" onclick="resetY(${id})">Auto</button>
+  `;
+}
+
+function updateTimeFill(id) {
+  const g=graphs[id], ds=datasets[g.dsId], span=ds.tMax-ds.tMin;
+  if(span===0) return;
+  const l=((g.tStart-ds.tMin)/span*100).toFixed(2), r=((g.tEnd-ds.tMin)/span*100).toFixed(2);
+  const fill=document.getElementById('tfill-'+id);
+  if(fill){fill.style.left=l+'%'; fill.style.width=(r-l)+'%';}
+}
+
+function onTimeSlider(id) {
+  let s=parseFloat(document.getElementById('tsl-'+id).value);
+  let e=parseFloat(document.getElementById('ter-'+id).value);
+  if(s>e){const t=s;s=e;e=t;}
+  graphs[id].tStart=s; graphs[id].tEnd=e;
+  document.getElementById('ts-'+id).value=s.toFixed(3);
+  document.getElementById('te-'+id).value=e.toFixed(3);
+  updateTimeFill(id); updateChart(id);
+}
+
+function onTimeInput(id) {
+  const ds=datasets[graphs[id].dsId];
+  let s=parseFloat(document.getElementById('ts-'+id).value);
+  let e=parseFloat(document.getElementById('te-'+id).value);
+  s=Math.max(ds.tMin,Math.min(ds.tMax,isNaN(s)?ds.tMin:s));
+  e=Math.max(ds.tMin,Math.min(ds.tMax,isNaN(e)?ds.tMax:e));
+  if(s>e){const t=s;s=e;e=t;}
+  graphs[id].tStart=s; graphs[id].tEnd=e;
+  document.getElementById('tsl-'+id).value=s;
+  document.getElementById('ter-'+id).value=e;
+  document.getElementById('ts-'+id).value=s.toFixed(3);
+  document.getElementById('te-'+id).value=e.toFixed(3);
+  updateTimeFill(id); updateChart(id);
+}
+
+function resetTime(id) {
+  const ds=datasets[graphs[id].dsId];
+  graphs[id].tStart=ds.tMin; graphs[id].tEnd=ds.tMax;
+  document.getElementById('ts-'+id).value=ds.tMin.toFixed(3);
+  document.getElementById('te-'+id).value=ds.tMax.toFixed(3);
+  document.getElementById('tsl-'+id).value=ds.tMin;
+  document.getElementById('ter-'+id).value=ds.tMax;
+  updateTimeFill(id); updateChart(id);
+}
+
+function onYInput(id) {
+  const mi=document.getElementById('ymi-'+id).value;
+  const ma=document.getElementById('yma-'+id).value;
+  graphs[id].yMin = mi==='' ? null : parseFloat(mi);
+  graphs[id].yMax = ma==='' ? null : parseFloat(ma);
+  document.getElementById('ymi-'+id).style.color = mi==='' ? 'var(--color-text-tertiary)' : 'var(--color-text-primary)';
+  document.getElementById('yma-'+id).style.color = ma==='' ? 'var(--color-text-tertiary)' : 'var(--color-text-primary)';
+  updateChart(id);
+}
+
+function resetY(id) {
+  graphs[id].yMin=null; graphs[id].yMax=null;
+  document.getElementById('ymi-'+id).value='';
+  document.getElementById('yma-'+id).value='';
+  document.getElementById('ymi-'+id).style.color='var(--color-text-tertiary)';
+  document.getElementById('yma-'+id).style.color='var(--color-text-tertiary)';
+  updateChart(id);
+}
+
+function renderPills(id) {
+  const g=graphs[id], ds=datasets[g.dsId];
+  const c=document.getElementById('pills-'+id); c.innerHTML='';
+  Object.entries(ds.groups).forEach(([grp,cols])=>{
+    const d=document.createElement('div'); d.className='var-group';
+    d.innerHTML=`<div class="var-group-label">${grp}</div><div class="var-pills"></div>`;
+    c.appendChild(d);
+    const row=d.querySelector('.var-pills');
+    cols.forEach(col=>{
+      const color=colColor(col,g.dsId);
+      const pill=document.createElement('span');
+      pill.className='pill'+(g.enabledCols.has(col)?'':' off');
+      pill.textContent=col.replace(/_/g,' '); pill.title=col;
+      pill.style.cssText=`background:${color}22;color:${color};border-color:${color}55;`;
+      pill.onclick=()=>{
+        if(g.enabledCols.has(col)){g.enabledCols.delete(col);pill.classList.add('off');}
+        else{g.enabledCols.add(col);pill.classList.remove('off');}
+        updateChart(id);
+      };
+      row.appendChild(pill);
+    });
+  });
+}
+
+function buildChart(id) {
+  const ctx=document.getElementById('canvas-'+id).getContext('2d');
+  const chart=new Chart(ctx,{
+    type:'line', data:{labels:[],datasets:[]},
+    options:{
+      responsive:true, maintainAspectRatio:false, animation:false,
+      interaction:{mode:'index',intersect:false},
+      plugins:{legend:{display:false},tooltip:{callbacks:{label:c=>`${c.dataset.label}: ${Number(c.parsed.y).toFixed(4)}`}}},
+      scales:{
+        x:{ticks:{font:{size:11},color:'#888',maxTicksLimit:8},grid:{color:'rgba(128,128,128,0.12)'},title:{display:true,text:'elapsed (s)',font:{size:11},color:'#888'}},
+        y:{ticks:{font:{size:11},color:'#888'},grid:{color:'rgba(128,128,128,0.12)'}}
+      }
+    }
+  });
+  graphs[id].chart=chart;
+  updateChart(id);
+}
+
+function updateChart(id) {
+  const {chart,dsId,enabledCols,tStart,tEnd,yMin,yMax}=graphs[id];
+  const ds=datasets[dsId];
+  const rows=ds.rows.filter(r=>{const t=parseFloat(r[ds.timeCol]);return !isNaN(t)&&t>=tStart&&t<=tEnd;});
+  chart.data.labels=rows.map(r=>parseFloat(r[ds.timeCol]).toFixed(3));
+  chart.data.datasets=ds.numericCols.filter(col=>enabledCols.has(col)).map(col=>{
+    const color=colColor(col,dsId);
+    return {label:col,data:rows.map(r=>parseFloat(r[col])),borderColor:color,backgroundColor:color+'18',borderWidth:1.5,pointRadius:rows.length>80?0:2,tension:0.2};
+  });
+  chart.options.scales.y.min = yMin!==null ? yMin : undefined;
+  chart.options.scales.y.max = yMax!==null ? yMax : undefined;
+  chart.update();
+}
+
+function changeDataset(id, dsId) {
+  const ds=datasets[dsId];
+  graphs[id].dsId=dsId; graphs[id].enabledCols=new Set((ds.numericCols||[]).slice(0,3));
+  graphs[id].tStart=ds.tMin; graphs[id].tEnd=ds.tMax; graphs[id].yMin=null; graphs[id].yMax=null;
+  renderTimeRange(id); renderYRange(id); renderPills(id); updateChart(id);
+}
+
+function saveGraph(id) {
+  const {chart,dsId,enabledCols}=graphs[id];
+  const ds=datasets[dsId];
+  const canvas=document.getElementById('canvas-'+id);
+  const activeCols=ds.numericCols.filter(c=>enabledCols.has(c));
+  const pad=12, legendH=activeCols.length>0?24:0;
+  const exportCanvas=document.createElement('canvas');
+  exportCanvas.width=canvas.width;
+  exportCanvas.height=canvas.height+legendH+(legendH>0?pad:0);
+  const ectx=exportCanvas.getContext('2d');
+  ectx.fillStyle='#ffffff';
+  ectx.fillRect(0,0,exportCanvas.width,exportCanvas.height);
+  ectx.drawImage(canvas,0,0);
+  if(activeCols.length>0){
+    let x=pad, y=canvas.height+pad+10;
+    ectx.font='11px sans-serif';
+    activeCols.forEach(col=>{
+      if(x>exportCanvas.width-80) return;
+      const color=colColor(col,dsId);
+      ectx.fillStyle=color; ectx.fillRect(x,y-9,10,10);
+      ectx.fillStyle='#444'; const label=col.replace(/_/g,' ');
+      ectx.fillText(label,x+14,y);
+      x+=ectx.measureText(label).width+22;
+    });
+  }
+  const link=document.createElement('a');
+  link.download=`imu_${ds.shortName.replace(/[^a-z0-9]/gi,'_')}_graph${id}.png`;
+  link.href=exportCanvas.toDataURL('image/png');
+  link.click();
+}
+
+function removeGraph(id) {
+  graphs[id].chart.destroy(); delete graphs[id];
+  document.getElementById('graph-'+id).remove();
+}
+</script>

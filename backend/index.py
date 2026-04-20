@@ -116,6 +116,59 @@ DEFAULT_TELEMETRY = {
     "detected_leds_per_camera": [0, 0],
     "spatial_data_valid": False,
 }
+DEFAULT_VISION_METRICS = {
+    "frames_processed": 0,
+    "valid_pose_frames": 0,
+    "all_markers_detected_frames": 0,
+    "per_camera_full_detection_frames": [0 for _ in range(EXPECTED_CAMERAS)],
+    "pose_success_rate": 0.0,
+    "full_marker_detection_rate": 0.0,
+    "per_camera_full_detection_rate": [0.0 for _ in range(EXPECTED_CAMERAS)],
+    "avg_mapping_error_px": 0.0,
+    "avg_model_fit_error_m": 0.0,
+    "tracking_loop_hz": 0.0,
+}
+DEFAULT_BRIDGE_METRICS = {
+    "serial_frames_rx": 0,
+    "espnow_tx_attempts": 0,
+    "espnow_tx_ok": 0,
+    "espnow_tx_fail": 0,
+    "oversize_drops": 0,
+    "tx_rate_hz": 0.0,
+    "last_tx_seq": 0,
+    "last_tx_latency_us": 0,
+    "counter_reset_sequence": 0,
+}
+DEFAULT_CONTROLLER_METRICS = {
+    "rx_packets": 0,
+    "rx_missing_packets": 0,
+    "rx_duplicate_packets": 0,
+    "rx_out_of_order_packets": 0,
+    "last_rx_seq": 0,
+    "loop_hz": 0.0,
+    "control_hz": 0.0,
+    "command_age_ms": 0,
+    "apply_latency_us": 0,
+    "motor_imbalance": 0.0,
+    "motor_outputs": [0.0, 0.0, 0.0, 0.0],
+    "counter_reset_sequence": 0,
+}
+IMU_LOG_COLUMNS = [
+    "imu_ready",
+    "imu_pitch_deg",
+    "imu_roll_deg",
+    "imu_pitch_rate_deg_s",
+    "imu_roll_rate_deg_s",
+    "mocap_valid",
+    "mocap_x_error_m",
+    "mocap_y_error_m",
+    "mocap_z_error_m",
+    "mocap_vx_m_s",
+    "mocap_vy_m_s",
+    "mocap_vz_m_s",
+    "mocap_yaw_error_deg",
+    "mocap_yaw_rate_deg_s",
+]
 PREVIEW_WIDTH = 240
 PREVIEW_JPEG_QUALITY = 45
 MAX_LED_REORDER_COST_PIXELS = 75
@@ -129,6 +182,18 @@ def default_imu_telemetry():
 
 def default_telemetry():
     return copy.deepcopy(DEFAULT_TELEMETRY)
+
+
+def default_vision_metrics():
+    return copy.deepcopy(DEFAULT_VISION_METRICS)
+
+
+def default_bridge_metrics():
+    return copy.deepcopy(DEFAULT_BRIDGE_METRICS)
+
+
+def default_controller_metrics():
+    return copy.deepcopy(DEFAULT_CONTROLLER_METRICS)
 
 
 def default_pid_config():
@@ -155,6 +220,15 @@ def coerce_float(value, default=0.0):
         return float(default)
 
 
+def coerce_int(value, default=0):
+    try:
+        if value is None:
+            raise ValueError
+        return int(value)
+    except (TypeError, ValueError):
+        return int(default)
+
+
 def sanitize_imu_telemetry(payload):
     payload = payload if isinstance(payload, dict) else {}
     return {
@@ -166,12 +240,231 @@ def sanitize_imu_telemetry(payload):
     }
 
 
+def sanitize_bridge_metrics(payload):
+    payload = payload if isinstance(payload, dict) else {}
+    return {
+        "serial_frames_rx": coerce_int(payload.get("serial_frames_rx", payload.get("sr")), 0),
+        "espnow_tx_attempts": coerce_int(
+            payload.get("espnow_tx_attempts", payload.get("ea")), 0
+        ),
+        "espnow_tx_ok": coerce_int(payload.get("espnow_tx_ok", payload.get("eo")), 0),
+        "espnow_tx_fail": coerce_int(payload.get("espnow_tx_fail", payload.get("ef")), 0),
+        "oversize_drops": coerce_int(payload.get("oversize_drops", payload.get("od")), 0),
+        "tx_rate_hz": round(
+            coerce_float(payload.get("tx_rate_hz", payload.get("thz")), 0.0), 2
+        ),
+        "last_tx_seq": coerce_int(payload.get("last_tx_seq", payload.get("sq")), 0),
+        "last_tx_latency_us": coerce_int(
+            payload.get("last_tx_latency_us", payload.get("lu")), 0
+        ),
+        "counter_reset_sequence": coerce_int(
+            payload.get("counter_reset_sequence", payload.get("rq")),
+            0,
+        ),
+    }
+
+
+def sanitize_controller_metrics(payload):
+    payload = payload if isinstance(payload, dict) else {}
+    raw_motor_outputs = payload.get("motor_outputs", payload.get("m", []))
+    if not isinstance(raw_motor_outputs, list):
+        raw_motor_outputs = []
+    motor_outputs = [
+        round(coerce_float(raw_motor_outputs[index], 0.0), 4)
+        if index < len(raw_motor_outputs)
+        else 0.0
+        for index in range(4)
+    ]
+    return {
+        "rx_packets": coerce_int(payload.get("rx_packets", payload.get("rp")), 0),
+        "rx_missing_packets": coerce_int(
+            payload.get("rx_missing_packets", payload.get("mg")), 0
+        ),
+        "rx_duplicate_packets": coerce_int(
+            payload.get("rx_duplicate_packets", payload.get("dp")), 0
+        ),
+        "rx_out_of_order_packets": coerce_int(
+            payload.get("rx_out_of_order_packets", payload.get("oo")), 0
+        ),
+        "last_rx_seq": coerce_int(payload.get("last_rx_seq", payload.get("sq")), 0),
+        "loop_hz": round(coerce_float(payload.get("loop_hz", payload.get("lh")), 0.0), 2),
+        "control_hz": round(
+            coerce_float(payload.get("control_hz", payload.get("ch")), 0.0), 2
+        ),
+        "command_age_ms": coerce_int(
+            payload.get("command_age_ms", payload.get("ca")), 0
+        ),
+        "apply_latency_us": coerce_int(
+            payload.get("apply_latency_us", payload.get("au")), 0
+        ),
+        "motor_imbalance": round(
+            coerce_float(payload.get("motor_imbalance", payload.get("mi")), 0.0), 4
+        ),
+        "motor_outputs": motor_outputs,
+        "counter_reset_sequence": coerce_int(
+            payload.get("counter_reset_sequence", payload.get("rq")),
+            0,
+        ),
+    }
+
+
 def merge_telemetry(base_telemetry=None, imu_telemetry=None):
     merged = default_telemetry()
     if isinstance(base_telemetry, dict):
         merged.update(copy.deepcopy(base_telemetry))
     merged["imu"] = sanitize_imu_telemetry(imu_telemetry)
     return merged
+
+
+def build_imu_log_values(sample=None, mocap_sample=None):
+    sample = sanitize_imu_telemetry(sample)
+    mocap_sample = mocap_sample if isinstance(mocap_sample, dict) else {}
+    return [
+        int(bool(sample.get("ready", False))),
+        f"{coerce_float(sample.get('pitch'), 0.0):.2f}",
+        f"{coerce_float(sample.get('roll'), 0.0):.2f}",
+        f"{coerce_float(sample.get('pitch_rate'), 0.0):.2f}",
+        f"{coerce_float(sample.get('roll_rate'), 0.0):.2f}",
+        int(bool(mocap_sample.get("valid", False))),
+        f"{coerce_float(mocap_sample.get('x_error'), 0.0):.4f}",
+        f"{coerce_float(mocap_sample.get('y_error'), 0.0):.4f}",
+        f"{coerce_float(mocap_sample.get('z_error'), 0.0):.4f}",
+        f"{coerce_float(mocap_sample.get('vx'), 0.0):.4f}",
+        f"{coerce_float(mocap_sample.get('vy'), 0.0):.4f}",
+        f"{coerce_float(mocap_sample.get('vz'), 0.0):.4f}",
+        f"{coerce_float(mocap_sample.get('yaw_error'), 0.0):.2f}",
+        f"{coerce_float(mocap_sample.get('yaw_rate'), 0.0):.2f}",
+    ]
+
+
+def build_vision_metrics_summary(
+    frames_processed,
+    valid_pose_frames,
+    all_markers_detected_frames,
+    per_camera_full_detection_frames,
+    tracking_loop_hz=0.0,
+    mapping_error_sum=0.0,
+    model_fit_error_sum=0.0,
+):
+    frames_processed = max(0, coerce_int(frames_processed, 0))
+    valid_pose_frames = max(0, coerce_int(valid_pose_frames, 0))
+    all_markers_detected_frames = max(0, coerce_int(all_markers_detected_frames, 0))
+    raw_per_camera = (
+        per_camera_full_detection_frames
+        if isinstance(per_camera_full_detection_frames, list)
+        else []
+    )
+    per_camera_counts = [
+        max(
+            0,
+            coerce_int(raw_per_camera[index] if index < len(raw_per_camera) else 0, 0),
+        )
+        for index in range(EXPECTED_CAMERAS)
+    ]
+
+    total_frames = max(1, frames_processed)
+    valid_frames = max(1, valid_pose_frames)
+    return {
+        "frames_processed": frames_processed,
+        "valid_pose_frames": valid_pose_frames,
+        "all_markers_detected_frames": all_markers_detected_frames,
+        "per_camera_full_detection_frames": per_camera_counts,
+        "pose_success_rate": round(valid_pose_frames / total_frames, 5),
+        "full_marker_detection_rate": round(
+            all_markers_detected_frames / total_frames,
+            5,
+        ),
+        "per_camera_full_detection_rate": [
+            round(success_frames / total_frames, 5)
+            for success_frames in per_camera_counts
+        ],
+        "avg_mapping_error_px": round(
+            coerce_float(mapping_error_sum, 0.0) / valid_frames,
+            5,
+        ),
+        "avg_model_fit_error_m": round(
+            coerce_float(model_fit_error_sum, 0.0) / valid_frames,
+            5,
+        ),
+        "tracking_loop_hz": round(coerce_float(tracking_loop_hz, 0.0), 2),
+    }
+
+
+def build_session_bridge_metrics(
+    current_metrics,
+    baseline_metrics=None,
+    expected_reset_sequence=0,
+):
+    current = sanitize_bridge_metrics(current_metrics)
+    baseline = sanitize_bridge_metrics(baseline_metrics)
+    expected_reset_sequence = max(0, coerce_int(expected_reset_sequence, 0))
+    if expected_reset_sequence > 0:
+        if current["counter_reset_sequence"] < expected_reset_sequence:
+            return default_bridge_metrics()
+        return current
+    return {
+        "serial_frames_rx": max(
+            0,
+            current["serial_frames_rx"] - baseline["serial_frames_rx"],
+        ),
+        "espnow_tx_attempts": max(
+            0,
+            current["espnow_tx_attempts"] - baseline["espnow_tx_attempts"],
+        ),
+        "espnow_tx_ok": max(
+            0,
+            current["espnow_tx_ok"] - baseline["espnow_tx_ok"],
+        ),
+        "espnow_tx_fail": max(
+            0,
+            current["espnow_tx_fail"] - baseline["espnow_tx_fail"],
+        ),
+        "oversize_drops": max(
+            0,
+            current["oversize_drops"] - baseline["oversize_drops"],
+        ),
+        "tx_rate_hz": current["tx_rate_hz"],
+        "last_tx_seq": max(0, current["last_tx_seq"] - baseline["last_tx_seq"]),
+        "last_tx_latency_us": current["last_tx_latency_us"],
+        "counter_reset_sequence": current["counter_reset_sequence"],
+    }
+
+
+def build_session_controller_metrics(
+    current_metrics,
+    baseline_metrics=None,
+    expected_reset_sequence=0,
+):
+    current = sanitize_controller_metrics(current_metrics)
+    baseline = sanitize_controller_metrics(baseline_metrics)
+    expected_reset_sequence = max(0, coerce_int(expected_reset_sequence, 0))
+    if expected_reset_sequence > 0:
+        if current["counter_reset_sequence"] < expected_reset_sequence:
+            return default_controller_metrics()
+        return current
+    return {
+        "rx_packets": max(0, current["rx_packets"] - baseline["rx_packets"]),
+        "rx_missing_packets": max(
+            0,
+            current["rx_missing_packets"] - baseline["rx_missing_packets"],
+        ),
+        "rx_duplicate_packets": max(
+            0,
+            current["rx_duplicate_packets"] - baseline["rx_duplicate_packets"],
+        ),
+        "rx_out_of_order_packets": max(
+            0,
+            current["rx_out_of_order_packets"] - baseline["rx_out_of_order_packets"],
+        ),
+        "last_rx_seq": max(0, current["last_rx_seq"] - baseline["last_rx_seq"]),
+        "loop_hz": current["loop_hz"],
+        "control_hz": current["control_hz"],
+        "command_age_ms": current["command_age_ms"],
+        "apply_latency_us": current["apply_latency_us"],
+        "motor_imbalance": current["motor_imbalance"],
+        "motor_outputs": copy.deepcopy(current["motor_outputs"]),
+        "counter_reset_sequence": current["counter_reset_sequence"],
+    }
 
 
 def sanitize_pid_config(payload):
@@ -864,20 +1157,7 @@ class ImuDataLogger:
             [
                 "iso_time",
                 "elapsed_s",
-                "imu_ready",
-                "imu_pitch_deg",
-                "imu_roll_deg",
-                "imu_pitch_rate_deg_s",
-                "imu_roll_rate_deg_s",
-                "mocap_valid",
-                "mocap_x_error_m",
-                "mocap_y_error_m",
-                "mocap_z_error_m",
-                "mocap_vx_m_s",
-                "mocap_vy_m_s",
-                "mocap_vz_m_s",
-                "mocap_yaw_error_deg",
-                "mocap_yaw_rate_deg_s",
+                *IMU_LOG_COLUMNS,
             ]
         )
         self.file_handle.flush()
@@ -896,20 +1176,7 @@ class ImuDataLogger:
             [
                 timestamp,
                 f"{elapsed:.3f}",
-                int(bool(sample.get("ready", False))),
-                f"{float(sample.get('pitch', 0.0)):.2f}",
-                f"{float(sample.get('roll', 0.0)):.2f}",
-                f"{float(sample.get('pitch_rate', 0.0)):.2f}",
-                f"{float(sample.get('roll_rate', 0.0)):.2f}",
-                int(bool(mocap_sample.get("valid", False))),
-                f"{float(mocap_sample.get('x_error', 0.0)):.4f}",
-                f"{float(mocap_sample.get('y_error', 0.0)):.4f}",
-                f"{float(mocap_sample.get('z_error', 0.0)):.4f}",
-                f"{float(mocap_sample.get('vx', 0.0)):.4f}",
-                f"{float(mocap_sample.get('vy', 0.0)):.4f}",
-                f"{float(mocap_sample.get('vz', 0.0)):.4f}",
-                f"{float(mocap_sample.get('yaw_error', 0.0)):.2f}",
-                f"{float(mocap_sample.get('yaw_rate', 0.0)):.2f}",
+                *build_imu_log_values(sample, mocap_sample),
             ]
         )
         self.file_handle.flush()
@@ -933,6 +1200,206 @@ class ImuDataLogger:
         return self.stop()
 
 
+class ExperimentMetricsLogger:
+    def __init__(self, log_dir: Path):
+        self.log_dir = Path(log_dir)
+        self.file_handle = None
+        self.csv_writer = None
+        self.log_path = None
+        self.started_at = 0.0
+
+    def is_active(self):
+        return self.file_handle is not None
+
+    def start(self):
+        if self.is_active():
+            return self.log_path
+
+        self.log_dir.mkdir(parents=True, exist_ok=True)
+        self.started_at = time.time()
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        self.log_path = self.log_dir / f"session_metrics_{timestamp}.csv"
+        self.file_handle = self.log_path.open("w", newline="", encoding="utf-8")
+        self.csv_writer = csv.writer(self.file_handle)
+        self.csv_writer.writerow(
+            [
+                "iso_time",
+                "elapsed_s",
+                *IMU_LOG_COLUMNS,
+                "backend_loop_hz",
+                "tracking_loop_hz",
+                "frames_processed",
+                "valid_pose_frames",
+                "pose_success_rate",
+                "full_marker_detection_rate",
+                "cam1_full_detection_rate",
+                "cam2_full_detection_rate",
+                "cam1_leds",
+                "cam2_leds",
+                "spatial_data_valid",
+                "mapping_error_px",
+                "model_fit_error_m",
+                "scale_factor",
+                "position_x_m",
+                "position_y_m",
+                "position_z_m",
+                "velocity_x_m_s",
+                "velocity_y_m_s",
+                "velocity_z_m_s",
+                "yaw_deg",
+                "pitch_deg",
+                "roll_deg",
+                "serial_connected",
+                "serial_send_enabled",
+                "serial_send_ok",
+                "serial_payload_seq",
+                "serial_payload_size_bytes",
+                "bridge_serial_frames_rx",
+                "bridge_espnow_tx_attempts",
+                "bridge_espnow_tx_ok",
+                "bridge_espnow_tx_fail",
+                "bridge_oversize_drops",
+                "bridge_tx_rate_hz",
+                "bridge_last_tx_seq",
+                "bridge_last_tx_latency_us",
+                "controller_rx_packets",
+                "controller_rx_missing_packets",
+                "controller_rx_duplicate_packets",
+                "controller_rx_out_of_order_packets",
+                "controller_last_rx_seq",
+                "controller_loop_hz",
+                "controller_control_hz",
+                "controller_command_age_ms",
+                "controller_apply_latency_us",
+                "controller_motor_imbalance",
+                "motor_1_output",
+                "motor_2_output",
+                "motor_3_output",
+                "motor_4_output",
+            ]
+        )
+        self.file_handle.flush()
+        print(f"Session metrics logging started: {self.log_path}")
+        return self.log_path
+
+    def log_sample(
+        self,
+        sample_time,
+        telemetry,
+        vision_metrics,
+        bridge_metrics,
+        controller_metrics,
+        backend_loop_hz,
+        serial_connected,
+        serial_send_enabled,
+        serial_send_ok,
+        serial_payload_seq,
+        serial_payload_size_bytes,
+        imu_sample=None,
+        mocap_sample=None,
+    ):
+        if not self.is_active():
+            return
+
+        telemetry = telemetry if isinstance(telemetry, dict) else {}
+        vision_metrics = (
+            vision_metrics if isinstance(vision_metrics, dict) else default_vision_metrics()
+        )
+        bridge_metrics = (
+            bridge_metrics if isinstance(bridge_metrics, dict) else default_bridge_metrics()
+        )
+        controller_metrics = (
+            controller_metrics
+            if isinstance(controller_metrics, dict)
+            else default_controller_metrics()
+        )
+        position = telemetry.get("position", {})
+        velocity = telemetry.get("velocity", {})
+        rotation = telemetry.get("rotation", {})
+        detected_leds = telemetry.get("detected_leds_per_camera", [])
+        motor_outputs = controller_metrics.get("motor_outputs", [0.0, 0.0, 0.0, 0.0])
+        imu_values = build_imu_log_values(imu_sample, mocap_sample)
+        timestamp = datetime.fromtimestamp(sample_time).isoformat(timespec="milliseconds")
+        elapsed = max(0.0, float(sample_time) - self.started_at)
+
+        self.csv_writer.writerow(
+            [
+                timestamp,
+                f"{elapsed:.3f}",
+                *imu_values,
+                f"{coerce_float(backend_loop_hz, 0.0):.2f}",
+                f"{coerce_float(vision_metrics.get('tracking_loop_hz'), 0.0):.2f}",
+                coerce_int(vision_metrics.get("frames_processed"), 0),
+                coerce_int(vision_metrics.get("valid_pose_frames"), 0),
+                f"{coerce_float(vision_metrics.get('pose_success_rate'), 0.0):.5f}",
+                f"{coerce_float(vision_metrics.get('full_marker_detection_rate'), 0.0):.5f}",
+                f"{coerce_float((vision_metrics.get('per_camera_full_detection_rate') or [0.0, 0.0])[0], 0.0):.5f}",
+                f"{coerce_float((vision_metrics.get('per_camera_full_detection_rate') or [0.0, 0.0])[1], 0.0):.5f}",
+                coerce_int(detected_leds[0] if len(detected_leds) > 0 else 0, 0),
+                coerce_int(detected_leds[1] if len(detected_leds) > 1 else 0, 0),
+                int(bool(telemetry.get("spatial_data_valid", False))),
+                f"{coerce_float(telemetry.get('mapping_error_px'), 0.0):.5f}",
+                f"{coerce_float(telemetry.get('model_fit_error_m'), 0.0):.5f}",
+                f"{coerce_float(telemetry.get('scale_factor'), 1.0):.5f}",
+                f"{coerce_float(position.get('x'), 0.0):.4f}",
+                f"{coerce_float(position.get('y'), 0.0):.4f}",
+                f"{coerce_float(position.get('z'), 0.0):.4f}",
+                f"{coerce_float(velocity.get('x'), 0.0):.4f}",
+                f"{coerce_float(velocity.get('y'), 0.0):.4f}",
+                f"{coerce_float(velocity.get('z'), 0.0):.4f}",
+                f"{coerce_float(rotation.get('yaw'), 0.0):.2f}",
+                f"{coerce_float(rotation.get('pitch'), 0.0):.2f}",
+                f"{coerce_float(rotation.get('roll'), 0.0):.2f}",
+                int(bool(serial_connected)),
+                int(bool(serial_send_enabled)),
+                int(bool(serial_send_ok)),
+                coerce_int(serial_payload_seq, 0),
+                coerce_int(serial_payload_size_bytes, 0),
+                coerce_int(bridge_metrics.get("serial_frames_rx"), 0),
+                coerce_int(bridge_metrics.get("espnow_tx_attempts"), 0),
+                coerce_int(bridge_metrics.get("espnow_tx_ok"), 0),
+                coerce_int(bridge_metrics.get("espnow_tx_fail"), 0),
+                coerce_int(bridge_metrics.get("oversize_drops"), 0),
+                f"{coerce_float(bridge_metrics.get('tx_rate_hz'), 0.0):.2f}",
+                coerce_int(bridge_metrics.get("last_tx_seq"), 0),
+                coerce_int(bridge_metrics.get("last_tx_latency_us"), 0),
+                coerce_int(controller_metrics.get("rx_packets"), 0),
+                coerce_int(controller_metrics.get("rx_missing_packets"), 0),
+                coerce_int(controller_metrics.get("rx_duplicate_packets"), 0),
+                coerce_int(controller_metrics.get("rx_out_of_order_packets"), 0),
+                coerce_int(controller_metrics.get("last_rx_seq"), 0),
+                f"{coerce_float(controller_metrics.get('loop_hz'), 0.0):.2f}",
+                f"{coerce_float(controller_metrics.get('control_hz'), 0.0):.2f}",
+                coerce_int(controller_metrics.get("command_age_ms"), 0),
+                coerce_int(controller_metrics.get("apply_latency_us"), 0),
+                f"{coerce_float(controller_metrics.get('motor_imbalance'), 0.0):.4f}",
+                f"{coerce_float(motor_outputs[0] if len(motor_outputs) > 0 else 0.0, 0.0):.4f}",
+                f"{coerce_float(motor_outputs[1] if len(motor_outputs) > 1 else 0.0, 0.0):.4f}",
+                f"{coerce_float(motor_outputs[2] if len(motor_outputs) > 2 else 0.0, 0.0):.4f}",
+                f"{coerce_float(motor_outputs[3] if len(motor_outputs) > 3 else 0.0, 0.0):.4f}",
+            ]
+        )
+        self.file_handle.flush()
+
+    def stop(self):
+        if not self.is_active():
+            return None
+
+        log_path = self.log_path
+        try:
+            self.file_handle.close()
+        finally:
+            self.file_handle = None
+            self.csv_writer = None
+            self.log_path = None
+            self.started_at = 0.0
+        print(f"Session metrics logging stopped: {log_path}")
+        return log_path
+
+    def close(self):
+        return self.stop()
+
+
 class SerialBridge:
     def __init__(self):
         self.connection = None
@@ -946,6 +1413,8 @@ class SerialBridge:
         self._consecutive_send_failures = 0
         self._serial_buffer = bytearray()
         self.latest_imu = default_imu_telemetry()
+        self.latest_bridge_metrics = default_bridge_metrics()
+        self.latest_controller_metrics = default_controller_metrics()
         self._last_imu_received_at = 0.0
         self.imu_sample_callback = None
 
@@ -1002,6 +1471,8 @@ class SerialBridge:
             self._consecutive_send_failures = 0
             self._serial_buffer = bytearray()
             self.latest_imu = default_imu_telemetry()
+            self.latest_bridge_metrics = default_bridge_metrics()
+            self.latest_controller_metrics = default_controller_metrics()
             self._last_imu_received_at = 0.0
             self.last_error = ""
             return True
@@ -1012,6 +1483,8 @@ class SerialBridge:
             self._consecutive_send_failures = 0
             self._serial_buffer = bytearray()
             self.latest_imu = default_imu_telemetry()
+            self.latest_bridge_metrics = default_bridge_metrics()
+            self.latest_controller_metrics = default_controller_metrics()
             self._last_imu_received_at = 0.0
             self.last_error = f"Serial connection failed: {exc}"
             return False
@@ -1040,6 +1513,8 @@ class SerialBridge:
         self._consecutive_send_failures = 0
         self._serial_buffer = bytearray()
         self.latest_imu = default_imu_telemetry()
+        self.latest_bridge_metrics = default_bridge_metrics()
+        self.latest_controller_metrics = default_controller_metrics()
         self._last_imu_received_at = 0.0
 
     def is_connected(self):
@@ -1054,21 +1529,30 @@ class SerialBridge:
         except json.JSONDecodeError:
             return
 
-        if payload.get("t") != "imu":
+        payload_type = str(payload.get("t", "")).strip().lower()
+        if payload_type == "imu":
+            self.latest_imu = sanitize_imu_telemetry(
+                {
+                    "ready": payload.get("ready", payload.get("ok", False)),
+                    "pitch": payload.get("pitch", payload.get("p", 0.0)),
+                    "roll": payload.get("roll", payload.get("r", 0.0)),
+                    "pitch_rate": payload.get("pitch_rate", payload.get("pr", 0.0)),
+                    "roll_rate": payload.get("roll_rate", payload.get("rr", 0.0)),
+                }
+            )
+            self._last_imu_received_at = time.time()
+            if callable(self.imu_sample_callback):
+                self.imu_sample_callback(
+                    copy.deepcopy(self.latest_imu), self._last_imu_received_at
+                )
             return
 
-        self.latest_imu = sanitize_imu_telemetry(
-            {
-                "ready": payload.get("ready", payload.get("ok", False)),
-                "pitch": payload.get("pitch", payload.get("p", 0.0)),
-                "roll": payload.get("roll", payload.get("r", 0.0)),
-                "pitch_rate": payload.get("pitch_rate", payload.get("pr", 0.0)),
-                "roll_rate": payload.get("roll_rate", payload.get("rr", 0.0)),
-            }
-        )
-        self._last_imu_received_at = time.time()
-        if callable(self.imu_sample_callback):
-            self.imu_sample_callback(copy.deepcopy(self.latest_imu), self._last_imu_received_at)
+        if payload_type == "bridge":
+            self.latest_bridge_metrics = sanitize_bridge_metrics(payload)
+            return
+
+        if payload_type == "ctrl":
+            self.latest_controller_metrics = sanitize_controller_metrics(payload)
 
     def poll_incoming(self):
         if not self.is_connected():
@@ -1184,6 +1668,124 @@ class MotionCaptureEngine:
             "pitch": ScalarKalmanFilter(1.0, 2.0),
             "roll": ScalarKalmanFilter(1.0, 2.0),
         }
+        self.metrics = default_vision_metrics()
+        self._last_frame_at = 0.0
+        self._mapping_error_sum = 0.0
+        self._model_fit_error_sum = 0.0
+
+    def reset_metrics(self):
+        self.metrics = default_vision_metrics()
+        self._last_frame_at = 0.0
+        self._mapping_error_sum = 0.0
+        self._model_fit_error_sum = 0.0
+
+    def record_frame_metrics(
+        self,
+        detected_led_counts,
+        spatial_valid,
+        mapping_error_px=0.0,
+        model_fit_error_m=0.0,
+        sample_time=None,
+    ):
+        sample_time = float(sample_time or time.time())
+        self.metrics["frames_processed"] += 1
+
+        if self._last_frame_at > 0.0:
+            dt_seconds = sample_time - self._last_frame_at
+            if dt_seconds > 0.0:
+                self.metrics["tracking_loop_hz"] = round(1.0 / dt_seconds, 2)
+        self._last_frame_at = sample_time
+
+        full_detection_flags = []
+        for index in range(EXPECTED_CAMERAS):
+            detected_count = coerce_int(
+                detected_led_counts[index] if index < len(detected_led_counts) else 0,
+                0,
+            )
+            has_full_detection = detected_count == MAX_LEDS
+            full_detection_flags.append(has_full_detection)
+            if has_full_detection:
+                self.metrics["per_camera_full_detection_frames"][index] += 1
+
+        if all(full_detection_flags):
+            self.metrics["all_markers_detected_frames"] += 1
+
+        if spatial_valid:
+            self.metrics["valid_pose_frames"] += 1
+            self._mapping_error_sum += float(mapping_error_px)
+            self._model_fit_error_sum += float(model_fit_error_m)
+
+        self.metrics.update(
+            build_vision_metrics_summary(
+                frames_processed=self.metrics["frames_processed"],
+                valid_pose_frames=self.metrics["valid_pose_frames"],
+                all_markers_detected_frames=self.metrics["all_markers_detected_frames"],
+                per_camera_full_detection_frames=self.metrics[
+                    "per_camera_full_detection_frames"
+                ],
+                tracking_loop_hz=self.metrics["tracking_loop_hz"],
+                mapping_error_sum=self._mapping_error_sum,
+                model_fit_error_sum=self._model_fit_error_sum,
+            )
+        )
+
+    def get_metrics_summary(self):
+        return copy.deepcopy(self.metrics)
+
+    def get_metrics_state(self):
+        state = copy.deepcopy(self.metrics)
+        state["_mapping_error_sum"] = float(self._mapping_error_sum)
+        state["_model_fit_error_sum"] = float(self._model_fit_error_sum)
+        return state
+
+    def get_metrics_summary_since(self, baseline_state=None):
+        current_state = self.get_metrics_state()
+        baseline_state = baseline_state if isinstance(baseline_state, dict) else {}
+        baseline_per_camera = baseline_state.get("per_camera_full_detection_frames", [])
+        current_per_camera = current_state.get("per_camera_full_detection_frames", [])
+
+        return build_vision_metrics_summary(
+            frames_processed=max(
+                0,
+                coerce_int(current_state.get("frames_processed"), 0)
+                - coerce_int(baseline_state.get("frames_processed"), 0),
+            ),
+            valid_pose_frames=max(
+                0,
+                coerce_int(current_state.get("valid_pose_frames"), 0)
+                - coerce_int(baseline_state.get("valid_pose_frames"), 0),
+            ),
+            all_markers_detected_frames=max(
+                0,
+                coerce_int(current_state.get("all_markers_detected_frames"), 0)
+                - coerce_int(baseline_state.get("all_markers_detected_frames"), 0),
+            ),
+            per_camera_full_detection_frames=[
+                max(
+                    0,
+                    coerce_int(
+                        current_per_camera[index] if index < len(current_per_camera) else 0,
+                        0,
+                    )
+                    - coerce_int(
+                        baseline_per_camera[index] if index < len(baseline_per_camera) else 0,
+                        0,
+                    ),
+                )
+                for index in range(EXPECTED_CAMERAS)
+            ],
+            tracking_loop_hz=current_state.get("tracking_loop_hz", 0.0),
+            mapping_error_sum=max(
+                0.0,
+                coerce_float(current_state.get("_mapping_error_sum"), 0.0)
+                - coerce_float(baseline_state.get("_mapping_error_sum"), 0.0),
+            ),
+            model_fit_error_sum=max(
+                0.0,
+                coerce_float(current_state.get("_model_fit_error_sum"), 0.0)
+                - coerce_float(baseline_state.get("_model_fit_error_sum"), 0.0),
+            ),
+        )
 
     def ensure_camera(self):
         if self.camera is not None:
@@ -1267,6 +1869,7 @@ class MotionCaptureEngine:
         self.latest_preview_frames = []
         self.last_preview_update = 0.0
         self.camera_pose_summary = []
+        self.reset_metrics()
         
         self.motion_state_filter.reset()
         for filter_instance in self.attitude_filters.values():
@@ -1348,8 +1951,9 @@ class MotionCaptureEngine:
             )
         ]
         
-        # Update previews
+        # Update previews and frame timing
         now = time.time()
+        detected_led_counts = [len(leds) for leds in all_cam_leds]
         if (
             not self.latest_preview_frames
             or (now - self.last_preview_update) >= (1.0 / PREVIEW_HZ)
@@ -1369,8 +1973,13 @@ class MotionCaptureEngine:
         
         # Check LED detection
         if not all(len(leds) == MAX_LEDS for leds in all_cam_leds_undistorted):
-            self.camera_error = "Waiting for all three cameras to detect exactly three LEDs."
+            self.camera_error = "Waiting for each camera to detect exactly three LEDs."
             self.motion_state_filter.reset()
+            self.record_frame_metrics(
+                detected_led_counts,
+                spatial_valid=False,
+                sample_time=now,
+            )
             return {
                 "position": {"x": 0.0, "y": 0.0, "z": 0.0},
                 "velocity": {"x": 0.0, "y": 0.0, "z": 0.0},
@@ -1380,7 +1989,7 @@ class MotionCaptureEngine:
                 "model_fit_error_m": 0.0,
                 "scale_factor": 1.0,
                 "solved_led_coordinates": [],
-                "detected_leds_per_camera": [len(leds) for leds in all_cam_leds],
+                "detected_leds_per_camera": detected_led_counts,
                 "spatial_data_valid": False,
             }
 
@@ -1402,24 +2011,27 @@ class MotionCaptureEngine:
         if pose is None:
             self.camera_error = "Pose solve failed or exceeded the fitting threshold."
             self.motion_state_filter.reset()
+            mapping_error_px = (
+                round(float(led_solution["mapping_cost"]), 5)
+                if led_solution is not None
+                else 0.0
+            )
+            self.record_frame_metrics(
+                detected_led_counts,
+                spatial_valid=False,
+                mapping_error_px=mapping_error_px,
+                sample_time=now,
+            )
             return {
                 "position": {"x": 0.0, "y": 0.0, "z": 0.0},
                 "velocity": {"x": 0.0, "y": 0.0, "z": 0.0},
                 "rotation": {"yaw": 0.0, "pitch": 0.0, "roll": 0.0},
-                "error": (
-                    round(float(led_solution["mapping_cost"]), 5)
-                    if led_solution is not None
-                    else 0.0
-                ),
-                "mapping_error_px": (
-                    round(float(led_solution["mapping_cost"]), 5)
-                    if led_solution is not None
-                    else 0.0
-                ),
+                "error": mapping_error_px,
+                "mapping_error_px": mapping_error_px,
                 "model_fit_error_m": 0.0,
                 "scale_factor": 1.0,
                 "solved_led_coordinates": [],
-                "detected_leds_per_camera": [len(leds) for leds in all_cam_leds],
+                "detected_leds_per_camera": detected_led_counts,
                 "spatial_data_valid": False,
             }
 
@@ -1470,6 +2082,13 @@ class MotionCaptureEngine:
         
         self.camera_error = ""
         pose["spatial_data_valid"] = True
+        self.record_frame_metrics(
+            detected_led_counts,
+            spatial_valid=True,
+            mapping_error_px=pose.get("mapping_error_px", 0.0),
+            model_fit_error_m=pose.get("model_fit_error_m", 0.0),
+            sample_time=now,
+        )
         
         return pose
 
@@ -1479,21 +2098,42 @@ class ControlServer:
         self.clients = set()
         self.control = ControlState()
         self.imu_logger = ImuDataLogger(DATA_LOG_DIR)
+        self.metrics_logger = ExperimentMetricsLogger(DATA_LOG_DIR)
         self.serial_bridge = SerialBridge()
         self.serial_bridge.imu_sample_callback = self.handle_imu_sample
         self.mocap = MotionCaptureEngine()
         self.telemetry = default_telemetry()
         self.last_serial_payload = None
         self.last_serial_attempt_payload = None
+        self.last_serial_payload_seq = 0
+        self.last_serial_payload_size_bytes = 0
         self.last_serial_send_ok = False
         self.last_serial_send_error = ""
+        self.serial_payload_sequence = 0
         self.imu_level_calibration_sequence = 0
         self.imu_level_calibration_requested_at = 0.0
         self.imu_level_calibration_sent = False
         self.imu_level_calibration_status = ""
+        self.packet_counter_reset_sequence = 0
+        self.session_packet_counter_reset_sequence = 0
         self.latest_mocap_log_sample = self.build_mocap_log_sample()
         self.last_mocap_yaw_unwrapped = None
         self.last_mocap_yaw_timestamp = 0.0
+        self.backend_loop_hz = 0.0
+        self._last_backend_loop_at = 0.0
+        self.logging_status = (
+            "Idle. Start a logging session from the frontend when ready."
+        )
+        self.session_vision_metrics_baseline = self.mocap.get_metrics_state()
+        self.session_bridge_metrics_baseline = copy.deepcopy(
+            self.serial_bridge.latest_bridge_metrics
+        )
+        self.session_controller_metrics_baseline = copy.deepcopy(
+            self.serial_bridge.latest_controller_metrics
+        )
+        self.session_serial_payload_seq_baseline = 0
+        self.metrics_log_path = None
+        self.imu_log_path = None
         self.state_lock = asyncio.Lock()
 
     def build_mocap_log_sample(self, telemetry=None, yaw_rate=0.0):
@@ -1549,11 +2189,81 @@ class ControlServer:
             mocap_sample=self.latest_mocap_log_sample,
         )
 
-    def sync_imu_logging(self, previous_armed):
-        if self.control.armed and not previous_armed:
-            self.imu_logger.start()
-        elif previous_armed and not self.control.armed:
-            self.imu_logger.stop()
+    def is_logging_active(self):
+        return self.metrics_logger.is_active()
+
+    def reset_session_metric_baselines(self):
+        self.packet_counter_reset_sequence += 1
+        self.session_packet_counter_reset_sequence = self.packet_counter_reset_sequence
+        self.session_vision_metrics_baseline = self.mocap.get_metrics_state()
+        self.session_bridge_metrics_baseline = copy.deepcopy(
+            self.serial_bridge.latest_bridge_metrics
+        )
+        self.session_controller_metrics_baseline = copy.deepcopy(
+            self.serial_bridge.latest_controller_metrics
+        )
+        self.session_serial_payload_seq_baseline = self.last_serial_payload_seq
+
+    def get_session_vision_metrics(self):
+        return self.mocap.get_metrics_summary_since(self.session_vision_metrics_baseline)
+
+    def get_session_bridge_metrics(self):
+        return build_session_bridge_metrics(
+            self.serial_bridge.latest_bridge_metrics,
+            self.session_bridge_metrics_baseline,
+            expected_reset_sequence=self.session_packet_counter_reset_sequence,
+        )
+
+    def get_session_controller_metrics(self):
+        return build_session_controller_metrics(
+            self.serial_bridge.latest_controller_metrics,
+            self.session_controller_metrics_baseline,
+            expected_reset_sequence=self.session_packet_counter_reset_sequence,
+        )
+
+    def get_session_serial_payload_seq(self):
+        return max(
+            0,
+            coerce_int(self.last_serial_payload_seq, 0)
+            - coerce_int(self.session_serial_payload_seq_baseline, 0),
+        )
+
+    def start_logging_session(self, status_message=None):
+        self.imu_logger.stop()
+        self.imu_log_path = None
+        self.reset_session_metric_baselines()
+        metrics_log_path = self.metrics_logger.start()
+        if metrics_log_path is not None:
+            self.metrics_log_path = str(metrics_log_path)
+
+        if self.metrics_logger.is_active():
+            self.logging_status = status_message or (
+                "Logging session active. Click the button again to stop and save the combined session_metrics CSV."
+            )
+            return True
+
+        self.logging_status = "Logging session could not be started cleanly."
+        return False
+
+    def stop_logging_session(self, status_message=None):
+        metrics_log_path = self.metrics_logger.stop()
+        self.imu_logger.stop()
+        if metrics_log_path is not None:
+            self.metrics_log_path = str(metrics_log_path)
+        self.imu_log_path = None
+
+        if self.metrics_log_path:
+            self.logging_status = status_message or (
+                "Logging session stopped. Combined metrics and IMU data were saved under backend/data_logs/."
+            )
+        else:
+            self.logging_status = "Logging session stopped."
+        return True
+
+    def toggle_logging_session(self):
+        if self.is_logging_active():
+            return self.stop_logging_session()
+        return self.start_logging_session()
 
     def is_imu_level_calibration_pending(self):
         if self.imu_level_calibration_sequence <= 0:
@@ -1592,6 +2302,8 @@ class ControlServer:
         velocity = self.telemetry.get("velocity", {})
         rotation = self.telemetry.get("rotation", {})
         imu_level_pending = self.is_imu_level_calibration_pending()
+        self.serial_payload_sequence += 1
+        payload_sequence = int(self.serial_payload_sequence)
 
         def make_payload(
             pose_digits,
@@ -1635,6 +2347,7 @@ class ControlServer:
                     compact_numeric(self.control.limits["maxTiltDeg"], angle_limit_digits),
                     compact_numeric(self.control.limits["maxYawRateDeg"], angle_limit_digits),
                 ],
+                "s": payload_sequence,
             }
             if include_version:
                 payload["v"] = 2
@@ -1686,6 +2399,16 @@ class ControlServer:
         )
         serial_ready = self.serial_bridge.is_connected()
         serial_send_enabled = self.control.active and serial_ready
+        if self.is_logging_active():
+            vision_metrics = self.get_session_vision_metrics()
+            bridge_metrics = self.get_session_bridge_metrics()
+            controller_metrics = self.get_session_controller_metrics()
+            serial_payload_seq = self.get_session_serial_payload_seq()
+        else:
+            vision_metrics = self.mocap.get_metrics_summary()
+            bridge_metrics = copy.deepcopy(self.serial_bridge.latest_bridge_metrics)
+            controller_metrics = copy.deepcopy(self.serial_bridge.latest_controller_metrics)
+            serial_payload_seq = self.last_serial_payload_seq
         return {
             "type": "state",
             "control": {
@@ -1717,10 +2440,22 @@ class ControlServer:
                 "lastSerialSendError": self.last_serial_send_error,
                 "lastSerialAttemptPayload": self.last_serial_attempt_payload,
                 "lastSerialPayload": self.last_serial_payload,
+                "lastSerialPayloadSeq": serial_payload_seq,
+                "lastSerialPayloadSizeBytes": self.last_serial_payload_size_bytes,
                 "imuLevelCalibrationPending": self.is_imu_level_calibration_pending(),
                 "imuLevelCalibrationSent": self.imu_level_calibration_sent,
                 "imuLevelCalibrationSequence": self.imu_level_calibration_sequence,
                 "imuLevelCalibrationStatus": self.imu_level_calibration_status,
+                "loggingActive": self.is_logging_active(),
+                "loggingStatus": self.logging_status,
+                "metricsLogPath": self.metrics_log_path,
+                "imuLogPath": self.imu_log_path,
+                "metrics": {
+                    "backendLoopHz": round(self.backend_loop_hz, 2),
+                    "vision": vision_metrics,
+                    "bridge": bridge_metrics,
+                    "controller": controller_metrics,
+                },
             },
         }
 
@@ -1748,9 +2483,9 @@ class ControlServer:
                     control_payload = payload.get("control", {})
                     if not isinstance(control_payload, dict):
                         control_payload = {}
-                    previous_armed = self.control.armed
                     previous_port = self.control.serial_port
                     previous_baud_rate = self.control.baud_rate
+                    previous_armed = self.control.armed
                     self.control.active = bool(control_payload.get("active", self.control.active))
                     self.control.armed = bool(control_payload.get("armed", self.control.armed))
                     self.control.serial_port = str(
@@ -1777,11 +2512,29 @@ class ControlServer:
                         self.serial_bridge.disconnect()
                     elif serial_settings_changed or not self.serial_bridge.is_connected():
                         self.serial_bridge.connect(self.control.serial_port, self.control.baud_rate)
-                    self.sync_imu_logging(previous_armed)
+
+                    if self.control.armed and not previous_armed and not self.is_logging_active():
+                        self.start_logging_session(
+                            status_message=(
+                                "Logging session started automatically because the drone was armed."
+                            )
+                        )
+                    elif (
+                        previous_armed
+                        and not self.control.armed
+                        and self.is_logging_active()
+                    ):
+                        self.stop_logging_session(
+                            status_message=(
+                                "Logging session stopped automatically because the drone was disarmed."
+                            )
+                        )
                 elif message_type == "refresh_serial_ports":
                     self.serial_bridge.refresh_ports(force=True)
                 elif message_type == "calibrate_imu_level":
                     self.queue_imu_level_calibration()
+                elif message_type == "toggle_logging_session":
+                    self.toggle_logging_session()
         except Exception as exc:
             self.serial_bridge.last_error = f"Control message handling failed: {exc}"
             print(f"Control message handling failed: {exc}")
@@ -1814,6 +2567,11 @@ class ControlServer:
         
         while True:
             loop_start = time.time()
+            if self._last_backend_loop_at > 0.0:
+                dt_seconds = loop_start - self._last_backend_loop_at
+                if dt_seconds > 0.0:
+                    self.backend_loop_hz = 1.0 / dt_seconds
+            self._last_backend_loop_at = loop_start
 
             try:
                 async with self.state_lock:
@@ -1853,6 +2611,13 @@ class ControlServer:
                     if should_send_serial and self.control.serial_port:
                         drone_index, serial_payload = self.build_serial_payload()
                         self.last_serial_attempt_payload = serial_payload
+                        self.last_serial_payload_seq = coerce_int(
+                            serial_payload.get("s"),
+                            self.last_serial_payload_seq,
+                        )
+                        self.last_serial_payload_size_bytes = serialized_payload_size_bytes(
+                            serial_payload
+                        )
                         if self.serial_bridge.send(drone_index, serial_payload):
                             self.last_serial_payload = serial_payload
                             self.last_serial_send_ok = True
@@ -1892,6 +2657,42 @@ class ControlServer:
                             )
                     self.serial_bridge.poll_incoming()
                     self.telemetry["imu"] = self.serial_bridge.get_latest_imu()
+                    vision_metrics = (
+                        self.get_session_vision_metrics()
+                        if self.is_logging_active()
+                        else self.mocap.get_metrics_summary()
+                    )
+                    bridge_metrics = (
+                        self.get_session_bridge_metrics()
+                        if self.is_logging_active()
+                        else copy.deepcopy(self.serial_bridge.latest_bridge_metrics)
+                    )
+                    controller_metrics = (
+                        self.get_session_controller_metrics()
+                        if self.is_logging_active()
+                        else copy.deepcopy(self.serial_bridge.latest_controller_metrics)
+                    )
+                    serial_payload_seq = (
+                        self.get_session_serial_payload_seq()
+                        if self.is_logging_active()
+                        else self.last_serial_payload_seq
+                    )
+                    self.metrics_logger.log_sample(
+                        sample_time=time.time(),
+                        telemetry=self.telemetry,
+                        vision_metrics=vision_metrics,
+                        bridge_metrics=bridge_metrics,
+                        controller_metrics=controller_metrics,
+                        backend_loop_hz=self.backend_loop_hz,
+                        serial_connected=self.serial_bridge.is_connected(),
+                        serial_send_enabled=should_send_serial
+                        and bool(self.control.serial_port),
+                        serial_send_ok=self.last_serial_send_ok,
+                        serial_payload_seq=serial_payload_seq,
+                        serial_payload_size_bytes=self.last_serial_payload_size_bytes,
+                        imu_sample=self.telemetry.get("imu", {}),
+                        mocap_sample=self.latest_mocap_log_sample,
+                    )
             except Exception as exc:
                 self.telemetry = merge_telemetry(
                     None,
@@ -1901,6 +2702,41 @@ class ControlServer:
                 self.mocap.camera_error = f"Tracking loop failed: {exc}"
                 print(f"Tracking loop failed: {exc}")
                 traceback.print_exc()
+                vision_metrics = (
+                    self.get_session_vision_metrics()
+                    if self.is_logging_active()
+                    else self.mocap.get_metrics_summary()
+                )
+                bridge_metrics = (
+                    self.get_session_bridge_metrics()
+                    if self.is_logging_active()
+                    else copy.deepcopy(self.serial_bridge.latest_bridge_metrics)
+                )
+                controller_metrics = (
+                    self.get_session_controller_metrics()
+                    if self.is_logging_active()
+                    else copy.deepcopy(self.serial_bridge.latest_controller_metrics)
+                )
+                serial_payload_seq = (
+                    self.get_session_serial_payload_seq()
+                    if self.is_logging_active()
+                    else self.last_serial_payload_seq
+                )
+                self.metrics_logger.log_sample(
+                    sample_time=time.time(),
+                    telemetry=self.telemetry,
+                    vision_metrics=vision_metrics,
+                    bridge_metrics=bridge_metrics,
+                    controller_metrics=controller_metrics,
+                    backend_loop_hz=self.backend_loop_hz,
+                    serial_connected=self.serial_bridge.is_connected(),
+                    serial_send_enabled=False,
+                    serial_send_ok=self.last_serial_send_ok,
+                    serial_payload_seq=serial_payload_seq,
+                    serial_payload_size_bytes=self.last_serial_payload_size_bytes,
+                    imu_sample=self.telemetry.get("imu", {}),
+                    mocap_sample=self.latest_mocap_log_sample,
+                )
 
             await self.broadcast_state()
             
@@ -1911,6 +2747,7 @@ class ControlServer:
     async def close(self):
         self.serial_bridge.disconnect()
         self.imu_logger.close()
+        self.metrics_logger.close()
         self.mocap.close()
 
 

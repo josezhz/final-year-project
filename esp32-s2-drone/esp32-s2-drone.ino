@@ -9,10 +9,13 @@ constexpr size_t MAX_PAYLOAD_LENGTH = 251;
 constexpr unsigned long SERIAL_WAIT_MS = 2000;
 constexpr unsigned long STATUS_PRINT_INTERVAL_MS = 1000;
 constexpr unsigned long IMU_TELEMETRY_INTERVAL_MS = 50;
+constexpr unsigned long CONTROLLER_STATUS_INTERVAL_MS = 500;
 constexpr unsigned long COMMAND_TIMEOUT_MS = 250;
 constexpr unsigned long ARM_RAMP_MS = 450;
 constexpr unsigned long IMU_REINIT_RETRY_MS = 1000;
 constexpr unsigned long IMU_ERROR_LOG_INTERVAL_MS = 1000;
+constexpr int LATENCY_RX_PULSE_PIN = -1;
+constexpr int LATENCY_MOTOR_PULSE_PIN = -1;
 
 constexpr uint8_t I2C_SDA_PIN = 11;
 constexpr uint8_t I2C_SCL_PIN = 10;
@@ -99,6 +102,8 @@ struct FlightCommand {
   float velocity[3];
   float rotation[3];
   float target[4];
+  uint32_t sequence;
+  uint32_t counterResetSequence;
   PidGains xyPos;
   PidGains zPos;
   PidGains yawPos;
@@ -132,6 +137,7 @@ struct ImuState {
 portMUX_TYPE payloadMux = portMUX_INITIALIZER_UNLOCKED;
 char pendingPayload[MAX_PAYLOAD_LENGTH] = {};
 volatile bool pendingPayloadReady = false;
+volatile unsigned long pendingPayloadReceivedMicros = 0;
 
 FlightCommand flightCommand = {};
 ImuState imuState = {};
@@ -160,10 +166,22 @@ uint8_t consecutiveImuFailures = 0;
 unsigned long lastCommandRxMs = 0;
 unsigned long armStartMs = 0;
 unsigned long lastStatusPrintMs = 0;
+unsigned long lastControllerStatusMs = 0;
 unsigned long nextImuInitAttemptMs = 0;
 unsigned long lastImuErrorLogMs = 0;
 bool motorsEnabled = false;
 bool imuConfigured = false;
+bool hasLastRxSequence = false;
+bool motorResponsePulsePending = false;
+uint32_t rxPackets = 0;
+uint32_t rxMissingPackets = 0;
+uint32_t rxDuplicatePackets = 0;
+uint32_t rxOutOfOrderPackets = 0;
+uint32_t lastRxSequence = 0;
+uint32_t lastApplyLatencyUs = 0;
+uint32_t lastHandledCounterResetSequence = 0;
+float lastLoopHz = 0.0f;
+float lastControlHz = 0.0f;
 
 float clampf(float value, float minValue, float maxValue) {
   if (value < minValue) {
@@ -183,6 +201,35 @@ float wrapDegrees(float angle) {
     angle += 360.0f;
   }
   return angle;
+}
+
+void configurePulsePin(int pin) {
+  if (pin < 0) {
+    return;
+  }
+
+  pinMode(pin, OUTPUT);
+  digitalWrite(pin, LOW);
+}
+
+void emitPulse(int pin) {
+  if (pin < 0) {
+    return;
+  }
+
+  digitalWrite(pin, HIGH);
+  delayMicroseconds(5);
+  digitalWrite(pin, LOW);
+}
+
+float computeMotorImbalance(const float outputs[MOTOR_COUNT]) {
+  float minOutput = outputs[0];
+  float maxOutput = outputs[0];
+  for (uint8_t index = 1; index < MOTOR_COUNT; ++index) {
+    minOutput = min(minOutput, outputs[index]);
+    maxOutput = max(maxOutput, outputs[index]);
+  }
+  return maxOutput - minOutput;
 }
 
 PidGains makePidGains(float kp, float ki, float kd) {
@@ -338,6 +385,7 @@ FlightCommand makeDefaultFlightCommand() {
   command.maxThrottle = 0.82f;
   command.maxTiltDeg = 12.0f;
   command.maxYawRateDeg = 120.0f;
+  command.counterResetSequence = 0;
   command.levelCalibrationSequence = 0;
   return command;
 }
@@ -548,6 +596,8 @@ bool parseFlightCommandPayload(const char *payload, FlightCommand &nextCommand) 
   float limits[5] = {};
 
   parsed.levelCalibrationSequence = 0;
+  parsed.sequence = 0;
+  parsed.counterResetSequence = 0;
 
   if (!parseBoolFlagEither(payload, "\"a\":", "\"arm\":", parsed.armed)) {
     return false;
@@ -583,6 +633,8 @@ bool parseFlightCommandPayload(const char *payload, FlightCommand &nextCommand) 
   parsed.maxThrottle = clampf(limits[2], parsed.hoverThrottle, 1.0f);
   parsed.maxTiltDeg = clampf(limits[3], 1.0f, 45.0f);
   parsed.maxYawRateDeg = clampf(limits[4], 1.0f, 360.0f);
+  parseUnsignedValue(payload, "\"s\":", parsed.sequence);
+  parseUnsignedValue(payload, "\"q\":", parsed.counterResetSequence);
   parseUnsignedValue(payload, "\"l\":", parsed.levelCalibrationSequence);
 
   nextCommand = parsed;
@@ -599,16 +651,18 @@ void onDataReceived(const esp_now_recv_info_t *recvInfo, const uint8_t *data, in
   portENTER_CRITICAL_ISR(&payloadMux);
   memcpy(pendingPayload, data, copyLength);
   pendingPayload[copyLength] = '\0';
+  pendingPayloadReceivedMicros = micros();
   pendingPayloadReady = true;
   portEXIT_CRITICAL_ISR(&payloadMux);
 }
 
-bool pullPendingPayload(char *buffer, size_t bufferSize) {
+bool pullPendingPayload(char *buffer, size_t bufferSize, unsigned long &receivedAtMicros) {
   bool hasPayload = false;
   portENTER_CRITICAL(&payloadMux);
   if (pendingPayloadReady) {
     strncpy(buffer, pendingPayload, bufferSize - 1);
     buffer[bufferSize - 1] = '\0';
+    receivedAtMicros = pendingPayloadReceivedMicros;
     pendingPayloadReady = false;
     hasPayload = true;
   }
@@ -632,17 +686,29 @@ bool ensureBridgePeerRegistered(uint8_t *peerMac, size_t peerMacLength) {
   return esp_now_add_peer(&peerInfo) == ESP_OK;
 }
 
+bool sendBridgePayload(const char *payload, size_t payloadLength) {
+  if (payload == nullptr || payloadLength == 0) {
+    return false;
+  }
+
+  uint8_t peerMac[6] = {};
+  if (!ensureBridgePeerRegistered(peerMac, sizeof(peerMac))) {
+    return false;
+  }
+
+  return esp_now_send(
+    peerMac,
+    reinterpret_cast<const uint8_t *>(payload),
+    payloadLength
+  ) == ESP_OK;
+}
+
 void sendImuTelemetry() {
   static unsigned long lastImuTelemetryMs = 0;
   if ((millis() - lastImuTelemetryMs) < IMU_TELEMETRY_INTERVAL_MS) {
     return;
   }
   lastImuTelemetryMs = millis();
-
-  uint8_t peerMac[6] = {};
-  if (!ensureBridgePeerRegistered(peerMac, sizeof(peerMac))) {
-    return;
-  }
 
   const float reportedRollDeg = imuState.ready ? imuState.rollDeg : 0.0f;
   const float reportedPitchDeg = imuState.ready ? imuState.pitchDeg : 0.0f;
@@ -664,11 +730,46 @@ void sendImuTelemetry() {
     return;
   }
 
-  esp_now_send(
-    peerMac,
-    reinterpret_cast<const uint8_t *>(payload),
-    static_cast<size_t>(payloadLength)
+  sendBridgePayload(payload, static_cast<size_t>(payloadLength));
+}
+
+void sendControllerStatus() {
+  if ((millis() - lastControllerStatusMs) < CONTROLLER_STATUS_INTERVAL_MS) {
+    return;
+  }
+  lastControllerStatusMs = millis();
+
+  const unsigned long commandAgeMs = lastCommandRxMs > 0
+    ? (millis() - lastCommandRxMs)
+    : 0;
+  const float motorImbalance = computeMotorImbalance(motorOutputs);
+
+  char payload[192] = {};
+  const int payloadLength = snprintf(
+    payload,
+    sizeof(payload),
+    "!{\"t\":\"ctrl\",\"rp\":%lu,\"mg\":%lu,\"dp\":%lu,\"oo\":%lu,\"sq\":%lu,\"lh\":%.2f,\"ch\":%.2f,\"ca\":%lu,\"au\":%lu,\"mi\":%.4f,\"m\":[%.3f,%.3f,%.3f,%.3f],\"rq\":%lu}",
+    static_cast<unsigned long>(rxPackets),
+    static_cast<unsigned long>(rxMissingPackets),
+    static_cast<unsigned long>(rxDuplicatePackets),
+    static_cast<unsigned long>(rxOutOfOrderPackets),
+    static_cast<unsigned long>(lastRxSequence),
+    lastLoopHz,
+    lastControlHz,
+    commandAgeMs,
+    static_cast<unsigned long>(lastApplyLatencyUs),
+    motorImbalance,
+    motorOutputs[0],
+    motorOutputs[1],
+    motorOutputs[2],
+    motorOutputs[3],
+    static_cast<unsigned long>(lastHandledCounterResetSequence)
   );
+  if (payloadLength <= 0 || payloadLength >= static_cast<int>(sizeof(payload))) {
+    return;
+  }
+
+  sendBridgePayload(payload, static_cast<size_t>(payloadLength));
 }
 
 bool initEspNowReceiver() {
@@ -700,6 +801,11 @@ void writeMotorOutputs(const float outputs[MOTOR_COUNT]) {
     motorOutputs[index] = clampf(outputs[index], 0.0f, 1.0f);
     const uint32_t duty = static_cast<uint32_t>(motorOutputs[index] * PWM_MAX_DUTY);
     ledcWrite(MOTOR_PINS[index], duty);
+  }
+
+  if (motorResponsePulsePending) {
+    emitPulse(LATENCY_MOTOR_PULSE_PIN);
+    motorResponsePulsePending = false;
   }
 }
 
@@ -1026,6 +1132,7 @@ void normalizeMotorOutputs(float outputs[MOTOR_COUNT]) {
 void runHoverController(float dtSeconds) {
   const bool commandFresh = (millis() - lastCommandRxMs) <= COMMAND_TIMEOUT_MS;
   const bool controlReady = commandFresh && flightCommand.armed && flightCommand.spatialValid && imuState.ready;
+  lastControlHz = controlReady && dtSeconds > 0.0f ? (1.0f / dtSeconds) : 0.0f;
 
   if (!controlReady) {
     stopMotors();
@@ -1185,9 +1292,22 @@ void runHoverController(float dtSeconds) {
   writeMotorOutputs(mixedOutputs);
 }
 
+void resetControllerPacketMetrics(uint32_t handledSequence) {
+  rxPackets = 0;
+  rxMissingPackets = 0;
+  rxDuplicatePackets = 0;
+  rxOutOfOrderPackets = 0;
+  lastRxSequence = 0;
+  hasLastRxSequence = false;
+  lastApplyLatencyUs = 0;
+  lastHandledCounterResetSequence = handledSequence;
+  lastControllerStatusMs = millis();
+}
+
 void processIncomingPayloads() {
   char payloadBuffer[MAX_PAYLOAD_LENGTH] = {};
-  if (!pullPendingPayload(payloadBuffer, sizeof(payloadBuffer))) {
+  unsigned long receivedAtMicros = 0;
+  if (!pullPendingPayload(payloadBuffer, sizeof(payloadBuffer), receivedAtMicros)) {
     return;
   }
 
@@ -1198,8 +1318,34 @@ void processIncomingPayloads() {
     return;
   }
 
+  if (
+    nextCommand.counterResetSequence > 0
+    && nextCommand.counterResetSequence > lastHandledCounterResetSequence
+  ) {
+    resetControllerPacketMetrics(nextCommand.counterResetSequence);
+  }
+
   flightCommand = nextCommand;
   lastCommandRxMs = millis();
+  lastApplyLatencyUs = static_cast<uint32_t>(micros() - receivedAtMicros);
+  rxPackets += 1;
+  if (nextCommand.sequence > 0) {
+    if (!hasLastRxSequence) {
+      hasLastRxSequence = true;
+      lastRxSequence = nextCommand.sequence;
+    } else if (nextCommand.sequence == lastRxSequence) {
+      rxDuplicatePackets += 1;
+    } else if (nextCommand.sequence > lastRxSequence) {
+      if (nextCommand.sequence > (lastRxSequence + 1)) {
+        rxMissingPackets += (nextCommand.sequence - lastRxSequence - 1);
+      }
+      lastRxSequence = nextCommand.sequence;
+    } else {
+      rxOutOfOrderPackets += 1;
+    }
+  }
+  emitPulse(LATENCY_RX_PULSE_PIN);
+  motorResponsePulsePending = true;
 }
 
 void printStatus() {
@@ -1238,6 +1384,8 @@ void printStatus() {
 void setup() {
   flightCommand = makeDefaultFlightCommand();
   resetImuFilters();
+  configurePulsePin(LATENCY_RX_PULSE_PIN);
+  configurePulsePin(LATENCY_MOTOR_PULSE_PIN);
 
   Serial.begin(USB_BAUD_RATE);
   const unsigned long waitStart = millis();
@@ -1261,6 +1409,7 @@ void setup() {
   bringUpMpu6050();
 
   Serial.println("Hover controller ready. Waiting for compact control payloads.");
+  lastControllerStatusMs = millis();
 }
 
 void loop() {
@@ -1269,6 +1418,8 @@ void loop() {
   float dtSeconds = static_cast<float>(nowMicros - lastLoopMicros) / 1000000.0f;
   lastLoopMicros = nowMicros;
   dtSeconds = clampf(dtSeconds, 0.001f, 0.02f);
+  lastLoopHz = dtSeconds > 0.0f ? (1.0f / dtSeconds) : 0.0f;
+  lastControlHz = 0.0f;
 
   processIncomingPayloads();
 
@@ -1282,6 +1433,7 @@ void loop() {
   }
 
   sendImuTelemetry();
+  sendControllerStatus();
   printStatus();
   delay(2);
 }
