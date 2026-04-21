@@ -853,6 +853,30 @@ function PidAxisCard({
   );
 }
 
+function StatusCard({ label, value, detail, tone = 'pending' }) {
+  return (
+    <div className={`status-card ${tone}`}>
+      <span className="meta-label">{label}</span>
+      <strong>{value}</strong>
+      <small>{detail}</small>
+    </div>
+  );
+}
+
+function DisclosureSection({ label, title, defaultOpen = false, children }) {
+  return (
+    <details className="disclosure-section" open={defaultOpen}>
+      <summary className="disclosure-summary">
+        <div>
+          <span className="meta-label">{label}</span>
+          <strong>{title}</strong>
+        </div>
+      </summary>
+      <div className="disclosure-body">{children}</div>
+    </details>
+  );
+}
+
 function App() {
   const socketRef = useRef(null);
   const hasInitialisedControl = useRef(false);
@@ -1078,21 +1102,21 @@ function App() {
     : 'Not started';
   const gateCards = [
     {
-      label: 'Frontend link',
+      label: 'Dashboard link',
       value: connectionState,
       tone: connectionState === 'Connected' ? 'ready' : connectionState === 'Connecting' ? 'pending' : 'blocked',
-      detail: 'WebSocket session',
+      detail: 'Frontend to backend',
     },
     {
-      label: 'Serial link',
+      label: 'Sender link',
       value: system.serialConnected ? 'Connected' : 'Offline',
       tone: system.serialConnected ? 'ready' : 'blocked',
       detail: system.serialConnected
         ? system.lastSerialSendError || system.serialPort || 'Port selected'
-        : system.serialError || 'Select sender COM port',
+        : system.serialError || 'Select the sender COM port',
     },
     {
-      label: 'Camera gates',
+      label: 'Camera tracking',
       value: system.camerasReady ? 'Ready' : 'Waiting',
       tone: system.camerasReady ? 'ready' : 'blocked',
       detail: `${system.connectedCameras}/${system.expectedCameras} cameras`,
@@ -1104,15 +1128,15 @@ function App() {
       detail: serverControl.active ? 'Backend is forwarding control frames' : 'Enable stream from the frontend',
     },
     {
-      label: 'Arm state',
-      value: serverControl.armed ? 'Armed' : 'Disarmed',
-      tone: serverControl.armed ? 'pending' : 'blocked',
+      label: 'Motor state',
+      value: serverControl.armed ? 'Armed' : 'Safe',
+      tone: serverControl.armed ? 'pending' : 'ready',
       detail: serverControl.armed
         ? 'Motors may spin when tracking stays valid'
         : 'Safe output state',
     },
     {
-      label: 'ESP send path',
+      label: 'Data path',
       value: system.serialForwarding ? 'Live' : system.canSendToEsp32 ? 'Ready' : 'Blocked',
       tone: system.serialForwarding ? 'ready' : system.canSendToEsp32 ? 'pending' : 'blocked',
       detail: system.serialForwarding
@@ -1314,52 +1338,256 @@ function App() {
       note: 'Pair this with the yaw-rate limit so the brushed motors do not saturate during turns.',
     },
   ];
+  const heroStatusCards = [
+    {
+      label: 'Frontend',
+      value: connectionState,
+      detail: 'Dashboard link',
+      tone: connectionState === 'Connected' ? 'ready' : connectionState === 'Connecting' ? 'pending' : 'blocked',
+    },
+    {
+      label: 'Tracking',
+      value: system.camerasReady ? 'Ready' : `${system.connectedCameras}/${system.expectedCameras}`,
+      detail: system.camerasReady ? 'Spatial data valid' : system.cameraError || 'Waiting for camera data',
+      tone: system.camerasReady ? 'ready' : 'blocked',
+    },
+    {
+      label: 'Sender',
+      value: system.serialConnected ? system.serialPort || 'Connected' : 'Offline',
+      detail: system.serialConnected ? 'ESP32-S3 link' : system.serialError || 'Select a COM port',
+      tone: system.serialConnected ? 'ready' : 'blocked',
+    },
+    {
+      label: 'Stream',
+      value: serverControl.active ? 'Live' : 'Stopped',
+      detail: serverControl.active ? 'Control frames are flowing' : 'Start the command stream',
+      tone: serverControl.active ? 'ready' : 'pending',
+    },
+    {
+      label: 'Motors',
+      value: serverControl.armed ? 'Armed' : 'Safe',
+      detail: serverControl.armed ? 'Propellers may spin' : 'Disarmed output state',
+      tone: serverControl.armed ? 'pending' : 'ready',
+    },
+  ];
+  const targetSummaryText = `X ${formatNumber(localControl.target.x, 2)} / Y ${formatNumber(localControl.target.y, 2)} / Z ${formatNumber(localControl.target.z, 2)} / Yaw ${formatNumber(localControl.target.yaw, 1)} deg`;
+  const flightMetricCards = [
+    {
+      label: 'Position X',
+      value: `${formatNumber(livePosition.x)} m`,
+      detail: 'World forward axis',
+    },
+    {
+      label: 'Position Y',
+      value: `${formatNumber(livePosition.y)} m`,
+      detail: 'World left-right axis',
+    },
+    {
+      label: 'Position Z',
+      value: `${formatNumber(livePosition.z)} m`,
+      detail: 'Height above origin',
+    },
+    {
+      label: 'Horizontal speed',
+      value: `${formatNumber(liveHorizontalSpeed)} m/s`,
+      detail: 'Combined XY motion',
+    },
+    {
+      label: 'Vertical speed',
+      value: `${formatNumber(liveVelocity.z)} m/s`,
+      detail: 'Climb or sink rate',
+    },
+    {
+      label: 'Yaw',
+      value: `${formatNumber(liveRotation.yaw, 2)} deg`,
+      detail: 'Heading',
+    },
+    {
+      label: 'Pitch',
+      value: `${formatNumber(liveRotation.pitch, 2)} deg`,
+      detail: 'Fore-aft tilt',
+    },
+    {
+      label: 'Roll',
+      value: `${formatNumber(liveRotation.roll, 2)} deg`,
+      detail: 'Side-to-side tilt',
+    },
+    {
+      label: 'Drone IMU',
+      value: telemetry.imu?.ready ? 'Live' : 'Waiting',
+      detail: telemetry.imu?.ready
+        ? `Pitch ${formatNumber(telemetry.imu.pitch, 1)} / Roll ${formatNumber(telemetry.imu.roll, 1)} deg`
+        : 'No onboard IMU data yet',
+      tone: telemetry.imu?.ready ? 'ready' : 'blocked',
+    },
+    {
+      label: 'Logging',
+      value: loggingSessionLabel,
+      detail: latestMetricsLogName,
+      tone: system.loggingActive ? 'ready' : 'pending',
+    },
+  ];
+  const debugPayloadText = system.lastSerialPayload
+    ? JSON.stringify(system.lastSerialPayload, null, 2)
+    : system.lastSerialAttemptPayload
+      ? `No successful payload has been sent yet.\n\nLast attempt status: ${system.lastSerialSendError || 'Pending'}\n\n${JSON.stringify(system.lastSerialAttemptPayload, null, 2)}`
+      : 'No payload has been sent yet.';
+  const payloadTone = system.lastSerialSendError
+    ? 'blocked'
+    : system.lastSerialPayload
+      ? 'ready'
+      : 'pending';
+  const payloadStatusLabel = system.lastSerialSendError
+    ? 'Needs attention'
+    : system.lastSerialPayload
+      ? 'Payload ready'
+      : 'Awaiting data';
+  const allPrimaryLinksReady = (
+    connectionState === 'Connected'
+    && system.serialConnected
+    && system.camerasReady
+  );
+  const hoverPathReady = allPrimaryLinksReady && system.canSendToEsp32 && serverControl.active;
+  let readinessTone = 'pending';
+  let readinessTitle = 'Almost ready';
+  let readinessDetail = 'Finish the remaining steps below to start a controlled hover session.';
+  if (serverControl.armed) {
+    readinessTone = 'pending';
+    readinessTitle = 'Motors are armed';
+    readinessDetail = 'Keep the live state and motion panels in view while the vehicle is allowed to spin its motors.';
+  } else if (hoverPathReady) {
+    readinessTone = 'ready';
+    readinessTitle = 'Ready for hover';
+    readinessDetail = 'Tracking, sender routing, and the live command stream are all available. Arm only when the area is clear.';
+  } else if (!allPrimaryLinksReady) {
+    readinessTone = 'blocked';
+    readinessTitle = 'System not ready';
+    readinessDetail = 'One or more required links are still offline, so the system is not ready to fly yet.';
+  }
+  let nextActionTitle = 'Start the command stream';
+  let nextActionDetail = 'The sender and tracking are in place. Start streaming control frames before arming.';
+  if (connectionState !== 'Connected') {
+    nextActionTitle = 'Reconnect the dashboard';
+    nextActionDetail = 'The frontend is not connected to the backend WebSocket, so no live control changes can be sent.';
+  } else if (!localControl.serialPort) {
+    nextActionTitle = 'Choose the sender COM port';
+    nextActionDetail = 'Select the ESP32-S3 sender port first so the backend knows where to route control data.';
+  } else if (isDirty) {
+    nextActionTitle = 'Apply pending changes';
+    nextActionDetail = 'You have unsent settings. Apply them so the backend uses the latest port, target, limits, and tuning values.';
+  } else if (!system.serialConnected) {
+    nextActionTitle = 'Connect the sender link';
+    nextActionDetail = 'The selected sender port has not connected yet. Confirm the board is present and apply the selection again if needed.';
+  } else if (!system.camerasReady) {
+    nextActionTitle = 'Wait for tracking to recover';
+    nextActionDetail = system.cameraError || `Only ${system.connectedCameras} of ${system.expectedCameras} cameras are currently ready.`;
+  } else if (!serverControl.active) {
+    nextActionTitle = 'Start the command stream';
+    nextActionDetail = 'Tracking and serial are available, but the backend is not yet forwarding live control frames.';
+  } else if (!system.canSendToEsp32) {
+    nextActionTitle = 'Wait for the sender path';
+    nextActionDetail = system.lastSerialSendError || 'The stream is up, but the sender path is not ready for successful serial writes yet.';
+  } else if (!serverControl.armed) {
+    nextActionTitle = 'Arm only when the area is clear';
+    nextActionDetail = 'The control path is ready. Confirm the hover target and safety limits, then arm the motors when safe.';
+  } else {
+    nextActionTitle = 'Monitor hover and logging';
+    nextActionDetail = 'Use the live state, camera views, and trend plots to watch the vehicle while it is armed.';
+  }
 
   return (
     <div className="app-shell">
-      <div className="ambient ambient-one" />
-      <div className="ambient ambient-two" />
-
       <main className="dashboard">
         <section className="hero">
           <div>
-            <p className="eyebrow">Python server to ESP32-S3 bridge</p>
-            <h1>Hover tuning workbench</h1>
+            <p className="eyebrow">Operator console</p>
+            <h1>Hover control dashboard</h1>
             <p className="hero-copy">
-              Tune the hover stack in the order you actually fly it: watch live target error,
-              shape the world-frame loops first, then tighten the inner attitude loops while
-              keeping the relay path and arm state in view.
+              Keep system readiness, core actions, and live hover behaviour in one calm view.
+              Advanced tuning and raw debug tools stay available below when you need them, but
+              they no longer take over the default screen.
             </p>
           </div>
 
-          <div className="status-strip">
-            <span className={`pill ${connectionState.toLowerCase()}`}>{connectionState}</span>
-            <span className={`pill ${system.camerasReady ? 'ready' : 'blocked'}`}>
-              Cameras {system.connectedCameras}/{system.expectedCameras}
-            </span>
-            <span className={`pill ${system.serialConnected ? 'ready' : 'blocked'}`}>
-              {system.serialConnected ? `Serial ${system.serialPort}` : 'Serial offline'}
-            </span>
-            <span
-              className={`pill ${
-                system.serialForwarding ? 'ready' : system.canSendToEsp32 ? 'pending' : 'blocked'
-              }`}
-            >
-              {system.serialForwarding ? 'Sending live' : system.canSendToEsp32 ? 'Link ready' : 'Send blocked'}
-            </span>
+          <div className="hero-status-grid">
+            {heroStatusCards.map((card) => (
+              <StatusCard key={card.label} {...card} />
+            ))}
           </div>
         </section>
 
         <section className="layout-grid">
+          <article className="panel panel-overview">
+            <div className="panel-heading">
+              <div>
+                <p className="panel-label">Readiness</p>
+                <h2>What needs attention now</h2>
+              </div>
+              <span className={`mini-badge ${readinessTone}`}>{readinessTitle}</span>
+            </div>
+
+            <div className={`readiness-banner ${readinessTone}`}>
+              <div>
+                <span className="meta-label">Overall state</span>
+                <strong>{readinessTitle}</strong>
+              </div>
+              <p>{readinessDetail}</p>
+            </div>
+
+            <div className="next-step-card">
+              <span className="meta-label">Next step</span>
+              <strong>{nextActionTitle}</strong>
+              <p>{nextActionDetail}</p>
+            </div>
+
+            <div className="gate-grid">
+              {gateCards.map((gate) => (
+                <div key={gate.label} className={`gate-card ${gate.tone}`}>
+                  <span className="meta-label">{gate.label}</span>
+                  <strong>{gate.value}</strong>
+                  <small>{gate.detail}</small>
+                </div>
+              ))}
+            </div>
+
+            <div className="system-list compact">
+              <div>
+                <span>Frontend clients</span>
+                <strong>{system.frontendClients}</strong>
+              </div>
+              <div>
+                <span>Camera IDs</span>
+                <strong>{system.cameraIds.length ? system.cameraIds.join(', ') : 'Unavailable'}</strong>
+              </div>
+              <div>
+                <span>Tracking state</span>
+                <strong>{system.camerasReady ? 'Valid spatial data' : system.cameraError || 'Tracking invalid'}</strong>
+              </div>
+              <div>
+                <span>Sender state</span>
+                <strong>
+                  {system.serialConnected
+                    ? system.lastSerialSendError || 'Connected'
+                    : system.serialError || 'Disconnected'}
+                </strong>
+              </div>
+            </div>
+          </article>
+
           <article className="panel panel-control">
             <div className="panel-heading">
               <div>
-                <p className="panel-label">Control</p>
-                <h2>Stream, arm, and setpoints</h2>
+                <p className="panel-label">Controls</p>
+                <h2>Connect, stream, and prepare hover</h2>
               </div>
-              <button className="ghost-button" onClick={() => sendMessage({ type: 'refresh_serial_ports' })}>
-                Refresh ports
-              </button>
+              <div className="panel-actions">
+                <span className={`mini-badge ${isDirty ? 'pending' : 'clean'}`}>
+                  {isDirty ? 'Pending changes' : 'All changes applied'}
+                </span>
+                <button className="ghost-button" onClick={() => sendMessage({ type: 'refresh_serial_ports' })}>
+                  Refresh ports
+                </button>
+              </div>
             </div>
 
             <div className="form-grid">
@@ -1390,14 +1618,20 @@ function App() {
               </label>
             </div>
 
-            <div className="action-row">
+            <div className="action-row action-row-primary">
               <button className="primary-button" onClick={() => applyControl()}>
-                Apply control
+                Apply all changes
               </button>
-              <button className={`toggle-button ${localControl.active ? 'active' : ''}`} onClick={toggleActivation}>
+              <button
+                className={`toggle-button toggle-button-stream ${localControl.active ? 'active' : ''}`}
+                onClick={toggleActivation}
+              >
                 {localControl.active ? 'Stop stream' : 'Start stream'}
               </button>
-              <button className={`toggle-button ${localControl.armed ? 'active' : ''}`} onClick={toggleArm}>
+              <button
+                className={`toggle-button toggle-button-arm ${localControl.armed ? 'active' : ''}`}
+                onClick={toggleArm}
+              >
                 {localControl.armed ? 'Disarm motors' : 'Arm motors'}
               </button>
               <button className="ghost-button" onClick={captureCurrentPoseAsTarget}>
@@ -1405,339 +1639,293 @@ function App() {
               </button>
             </div>
 
-            <div className="control-stack">
-              <div className="subsection-card">
-                <div className="subsection-head">
-                  <span className="meta-label">Logging session</span>
-                  <strong>Manual start and stop</strong>
-                </div>
-                <p className="axis-copy">
-                  Start a session when you are ready to record report data, or just arm the drone
-                  and let logging begin automatically. Disarming ends the session, and the same
-                  button still lets you start or stop logging manually.
-                </p>
-                <div className="action-row">
-                  <button
-                    className={`toggle-button ${system.loggingActive ? 'active' : ''}`}
-                    onClick={toggleLoggingSession}
-                    disabled={connectionState !== 'Connected'}
-                  >
-                    {system.loggingActive ? 'Stop logging session' : 'Start logging session'}
-                  </button>
-                  <span className={`pill ${loggingSessionTone}`}>{loggingSessionLabel}</span>
-                </div>
-                <p className="hint">{loggingSessionStatus}</p>
-                <div className="system-list compact">
-                  <div>
-                    <span>Session log</span>
-                    <strong>{latestMetricsLogName}</strong>
-                  </div>
-                  <div>
-                    <span>IMU fields</span>
-                    <strong>Included in session CSV</strong>
-                  </div>
-                </div>
+            <div className="system-list compact">
+              <div>
+                <span>Selected port</span>
+                <strong>{localControl.serialPort || 'Not selected'}</strong>
               </div>
-
-              <div className="subsection-card">
-                <div className="subsection-head">
-                  <span className="meta-label">Target pose</span>
-                  <strong>Hover reference</strong>
-                </div>
-                <div className="field-grid field-grid-compact">
-                  <label>
-                    <span>Target X</span>
-                    <input
-                      type="number"
-                      step="0.01"
-                      value={localControl.target.x}
-                      onChange={(event) => updateNestedControlField('target', 'x', event.target.value)}
-                    />
-                  </label>
-                  <label>
-                    <span>Target Y</span>
-                    <input
-                      type="number"
-                      step="0.01"
-                      value={localControl.target.y}
-                      onChange={(event) => updateNestedControlField('target', 'y', event.target.value)}
-                    />
-                  </label>
-                  <label>
-                    <span>Target Z</span>
-                    <input
-                      type="number"
-                      step="0.01"
-                      value={localControl.target.z}
-                      onChange={(event) => updateNestedControlField('target', 'z', event.target.value)}
-                    />
-                  </label>
-                  <label>
-                    <span>Target Yaw</span>
-                    <input
-                      type="number"
-                      step="1"
-                      value={localControl.target.yaw}
-                      onChange={(event) => updateNestedControlField('target', 'yaw', event.target.value)}
-                    />
-                  </label>
-                </div>
+              <div>
+                <span>Baud rate</span>
+                <strong>{localControl.baudRate}</strong>
               </div>
-
-              <div className="subsection-card">
-                <div className="subsection-head">
-                  <span className="meta-label">Hover limits</span>
-                  <strong>Throttle and attitude bounds</strong>
-                </div>
-                <div className="field-grid">
-                  <label>
-                    <span>Hover throttle</span>
-                    <input
-                      type="number"
-                      step="0.01"
-                      min="0"
-                      max="1"
-                      value={localControl.limits.hoverThrottle}
-                      onChange={(event) => updateNestedControlField('limits', 'hoverThrottle', event.target.value)}
-                    />
-                  </label>
-                  <label>
-                    <span>Min throttle</span>
-                    <input
-                      type="number"
-                      step="0.01"
-                      min="0"
-                      max="1"
-                      value={localControl.limits.minThrottle}
-                      onChange={(event) => updateNestedControlField('limits', 'minThrottle', event.target.value)}
-                    />
-                  </label>
-                  <label>
-                    <span>Max throttle</span>
-                    <input
-                      type="number"
-                      step="0.01"
-                      min="0"
-                      max="1"
-                      value={localControl.limits.maxThrottle}
-                      onChange={(event) => updateNestedControlField('limits', 'maxThrottle', event.target.value)}
-                    />
-                  </label>
-                  <label>
-                    <span>Max tilt (deg)</span>
-                    <input
-                      type="number"
-                      step="0.5"
-                      min="1"
-                      value={localControl.limits.maxTiltDeg}
-                      onChange={(event) => updateNestedControlField('limits', 'maxTiltDeg', event.target.value)}
-                    />
-                  </label>
-                  <label>
-                    <span>Max yaw rate (deg/s)</span>
-                    <input
-                      type="number"
-                      step="1"
-                      min="1"
-                      value={localControl.limits.maxYawRateDeg}
-                      onChange={(event) => updateNestedControlField('limits', 'maxYawRateDeg', event.target.value)}
-                    />
-                  </label>
-                </div>
+              <div>
+                <span>Hover target</span>
+                <strong>{targetSummaryText}</strong>
               </div>
-
-              <div className="subsection-card">
-                <div className="subsection-head">
-                  <span className="meta-label">IMU level trim</span>
-                  <strong>Set horizontal zero</strong>
-                </div>
-                <p className="axis-copy">
-                  Place the drone on a flat surface with the motors disarmed, then capture the
-                  current attitude as roll and pitch zero on the ESP32-S2.
-                </p>
-                <div className="action-row">
-                  <button
-                    className="ghost-button"
-                    onClick={requestImuLevelCalibration}
-                    disabled={!canRequestImuLevelCalibration}
-                  >
-                    Calibrate IMU level
-                  </button>
-                  <span className={`pill ${imuLevelCalibrationTone}`}>{imuLevelCalibrationLabel}</span>
-                </div>
-                <p className="hint">{imuLevelCalibrationStatus}</p>
+              <div>
+                <span>Latest log file</span>
+                <strong>{latestMetricsLogName}</strong>
               </div>
             </div>
 
             <p className="hint">
-              The stream switch feeds the ESP32-S3 relay, while the arm switch is the actual
-              motor-enable intent. Capture the current mocap pose as the hover target before arming.
+              Start the command stream before arming. Capturing the current mocap pose is the
+              fastest way to set a safe hover target.
             </p>
-          </article>
 
-          <article className="panel panel-overview">
-            <div className="panel-heading">
-              <div>
-                <p className="panel-label">Overview</p>
-                <h2>Readiness and routing</h2>
-              </div>
-            </div>
-
-            <div className="gate-grid">
-              {gateCards.map((gate) => (
-                <div key={gate.label} className={`gate-card ${gate.tone}`}>
-                  <span className="meta-label">{gate.label}</span>
-                  <strong>{gate.value}</strong>
-                  <small>{gate.detail}</small>
+            <div className="control-stack">
+              <DisclosureSection
+                label="Target and limits"
+                title="Hover target and safety bounds"
+                defaultOpen
+              >
+                <div className="subsection-card">
+                  <div className="subsection-head">
+                    <span className="meta-label">Hover target</span>
+                    <strong>Where the drone should hold station</strong>
+                  </div>
+                  <div className="field-grid field-grid-compact">
+                    <label>
+                      <span>Target X</span>
+                      <input
+                        type="number"
+                        step="0.01"
+                        value={localControl.target.x}
+                        onChange={(event) => updateNestedControlField('target', 'x', event.target.value)}
+                      />
+                    </label>
+                    <label>
+                      <span>Target Y</span>
+                      <input
+                        type="number"
+                        step="0.01"
+                        value={localControl.target.y}
+                        onChange={(event) => updateNestedControlField('target', 'y', event.target.value)}
+                      />
+                    </label>
+                    <label>
+                      <span>Target Z</span>
+                      <input
+                        type="number"
+                        step="0.01"
+                        value={localControl.target.z}
+                        onChange={(event) => updateNestedControlField('target', 'z', event.target.value)}
+                      />
+                    </label>
+                    <label>
+                      <span>Target Yaw</span>
+                      <input
+                        type="number"
+                        step="1"
+                        value={localControl.target.yaw}
+                        onChange={(event) => updateNestedControlField('target', 'yaw', event.target.value)}
+                      />
+                    </label>
+                  </div>
                 </div>
-              ))}
-            </div>
 
-            <div className="system-list compact">
-              <div>
-                <span>Frontend clients</span>
-                <strong>{system.frontendClients}</strong>
-              </div>
-              <div>
-                <span>Camera IDs</span>
-                <strong>{system.cameraIds.length ? system.cameraIds.join(', ') : 'Unavailable'}</strong>
-              </div>
-              <div>
-                <span>Camera state</span>
-                <strong>{system.camerasReady ? 'Valid spatial data' : system.cameraError || 'Tracking invalid'}</strong>
-              </div>
-              <div>
-                <span>Serial state</span>
-                <strong>
-                  {system.serialConnected
-                    ? system.lastSerialSendError || 'Connected'
-                    : system.serialError || 'Disconnected'}
-                </strong>
-              </div>
-            </div>
-          </article>
+                <div className="subsection-card">
+                  <div className="subsection-head">
+                    <span className="meta-label">Safety limits</span>
+                    <strong>Throttle and attitude limits</strong>
+                  </div>
+                  <div className="field-grid">
+                    <label>
+                      <span>Hover throttle</span>
+                      <input
+                        type="number"
+                        step="0.01"
+                        min="0"
+                        max="1"
+                        value={localControl.limits.hoverThrottle}
+                        onChange={(event) => updateNestedControlField('limits', 'hoverThrottle', event.target.value)}
+                      />
+                    </label>
+                    <label>
+                      <span>Min throttle</span>
+                      <input
+                        type="number"
+                        step="0.01"
+                        min="0"
+                        max="1"
+                        value={localControl.limits.minThrottle}
+                        onChange={(event) => updateNestedControlField('limits', 'minThrottle', event.target.value)}
+                      />
+                    </label>
+                    <label>
+                      <span>Max throttle</span>
+                      <input
+                        type="number"
+                        step="0.01"
+                        min="0"
+                        max="1"
+                        value={localControl.limits.maxThrottle}
+                        onChange={(event) => updateNestedControlField('limits', 'maxThrottle', event.target.value)}
+                      />
+                    </label>
+                    <label>
+                      <span>Max tilt (deg)</span>
+                      <input
+                        type="number"
+                        step="0.5"
+                        min="1"
+                        value={localControl.limits.maxTiltDeg}
+                        onChange={(event) => updateNestedControlField('limits', 'maxTiltDeg', event.target.value)}
+                      />
+                    </label>
+                    <label>
+                      <span>Max yaw rate (deg/s)</span>
+                      <input
+                        type="number"
+                        step="1"
+                        min="1"
+                        value={localControl.limits.maxYawRateDeg}
+                        onChange={(event) => updateNestedControlField('limits', 'maxYawRateDeg', event.target.value)}
+                      />
+                    </label>
+                  </div>
+                </div>
+              </DisclosureSection>
 
-          <article className="panel panel-payload">
-            <div className="panel-heading">
-              <div>
-                <p className="panel-label">Serial payload</p>
-                <h2>Latest JSON sent to ESP32-S3</h2>
-              </div>
-            </div>
+              <DisclosureSection label="Service tools" title="Logging and IMU calibration">
+                <div className="disclosure-grid">
+                  <div className="subsection-card">
+                    <div className="subsection-head">
+                      <span className="meta-label">Logging session</span>
+                      <strong>Manual start and stop</strong>
+                    </div>
+                    <p className="axis-copy">
+                      Start a session when you are ready to record report data, or just arm the
+                      drone and let logging begin automatically. Disarming ends the session, and
+                      the same button still lets you start or stop logging manually.
+                    </p>
+                    <div className="action-row">
+                      <button
+                        className={`toggle-button toggle-button-stream ${system.loggingActive ? 'active' : ''}`}
+                        onClick={toggleLoggingSession}
+                        disabled={connectionState !== 'Connected'}
+                      >
+                        {system.loggingActive ? 'Stop logging session' : 'Start logging session'}
+                      </button>
+                      <span className={`pill ${loggingSessionTone}`}>{loggingSessionLabel}</span>
+                    </div>
+                    <p className="hint">{loggingSessionStatus}</p>
+                    <div className="system-list compact">
+                      <div>
+                        <span>Session log</span>
+                        <strong>{latestMetricsLogName}</strong>
+                      </div>
+                      <div>
+                        <span>IMU fields</span>
+                        <strong>Included in session CSV</strong>
+                      </div>
+                    </div>
+                  </div>
 
-            <pre>
-              {system.lastSerialPayload
-                ? JSON.stringify(system.lastSerialPayload, null, 2)
-                : system.lastSerialAttemptPayload
-                  ? `No successful payload has been sent yet.\n\nLast attempt status: ${
-                      system.lastSerialSendError || 'Pending'
-                    }\n\n${JSON.stringify(system.lastSerialAttemptPayload, null, 2)}`
-                  : 'No payload has been sent yet.'}
-            </pre>
-          </article>
-
-          <article className="panel panel-poses">
-            <div className="panel-heading">
-              <div>
-                <p className="panel-label">Scene</p>
-                <h2>Camera extrinsics</h2>
-              </div>
+                  <div className="subsection-card">
+                    <div className="subsection-head">
+                      <span className="meta-label">IMU level trim</span>
+                      <strong>Set horizontal zero</strong>
+                    </div>
+                    <p className="axis-copy">
+                      Place the drone on a flat surface with the motors disarmed, then capture the
+                      current attitude as roll and pitch zero on the ESP32-S2.
+                    </p>
+                    <div className="action-row">
+                      <button
+                        className="ghost-button"
+                        onClick={requestImuLevelCalibration}
+                        disabled={!canRequestImuLevelCalibration}
+                      >
+                        Calibrate IMU level
+                      </button>
+                      <span className={`pill ${imuLevelCalibrationTone}`}>{imuLevelCalibrationLabel}</span>
+                    </div>
+                    <p className="hint">{imuLevelCalibrationStatus}</p>
+                  </div>
+                </div>
+              </DisclosureSection>
             </div>
-            <CameraPoseScene cameraPoses={system.cameraPoses} telemetry={telemetry} />
           </article>
 
           <article className="panel panel-telemetry">
             <div className="panel-heading">
               <div>
-                <p className="panel-label">Telemetry</p>
-                <h2>Pose and solver status</h2>
+                <p className="panel-label">Live state</p>
+                <h2>Flight and tracking at a glance</h2>
               </div>
+              <span className={`mini-badge ${telemetry.spatial_data_valid ? 'ready' : 'blocked'}`}>
+                {telemetry.spatial_data_valid ? 'Tracking valid' : 'Tracking invalid'}
+              </span>
             </div>
 
-            <div className="metric-grid">
-              <div className="metric-card">
-                <span>Position X</span>
-                <strong>{formatNumber(telemetry.position.x)}</strong>
-              </div>
-              <div className="metric-card">
-                <span>Position Y</span>
-                <strong>{formatNumber(telemetry.position.y)}</strong>
-              </div>
-              <div className="metric-card">
-                <span>Position Z</span>
-                <strong>{formatNumber(telemetry.position.z)}</strong>
-              </div>
-              <div className="metric-card">
-                <span>Velocity X</span>
-                <strong>{formatNumber(telemetry.velocity?.x ?? 0)}</strong>
-              </div>
-              <div className="metric-card">
-                <span>Velocity Y</span>
-                <strong>{formatNumber(telemetry.velocity?.y ?? 0)}</strong>
-              </div>
-              <div className="metric-card">
-                <span>Velocity Z</span>
-                <strong>{formatNumber(telemetry.velocity?.z ?? 0)}</strong>
-              </div>
-              <div className="metric-card">
-                <span>Yaw</span>
-                <strong>{formatNumber(telemetry.rotation.yaw, 2)} deg</strong>
-              </div>
-              <div className="metric-card">
-                <span>Pitch</span>
-                <strong>{formatNumber(telemetry.rotation.pitch, 2)} deg</strong>
-              </div>
-              <div className="metric-card">
-                <span>Roll</span>
-                <strong>{formatNumber(telemetry.rotation.roll, 2)} deg</strong>
-              </div>
+            <div className="metric-grid metric-grid-live">
+              {flightMetricCards.map((card) => (
+                <div key={card.label} className={`metric-card ${card.tone ?? ''}`.trim()}>
+                  <span>{card.label}</span>
+                  <strong>{card.value}</strong>
+                  <small>{card.detail}</small>
+                </div>
+              ))}
             </div>
 
-            <div className="meta-row">
-              <div>
-                <span className="meta-label">Legacy solver error</span>
-                <strong>{formatNumber(telemetry.error, 5)}</strong>
-              </div>
-              <div>
-                <span className="meta-label">Mapping error</span>
-                <strong>{formatNumber(telemetry.mapping_error_px, 5)} px</strong>
-              </div>
-              <div>
-                <span className="meta-label">Model fit</span>
-                <strong>{formatNumber(telemetry.model_fit_error_m, 5)} m</strong>
-              </div>
-              <div>
-                <span className="meta-label">LED model scale</span>
-                <strong>{formatNumber(telemetry.scale_factor, 5)}x</strong>
-              </div>
+            <div className="pid-summary-grid">
+              {snapshotCards.map((card) => (
+                <SnapshotCard key={card.label} {...card} />
+              ))}
             </div>
 
-            <div className="meta-row">
+            <DisclosureSection label="Tracking quality" title="Solver detail and LED coordinates">
+              <div className="meta-row">
+                <div>
+                  <span className="meta-label">Legacy solver error</span>
+                  <strong>{formatNumber(telemetry.error, 5)}</strong>
+                </div>
+                <div>
+                  <span className="meta-label">Mapping error</span>
+                  <strong>{formatNumber(telemetry.mapping_error_px, 5)} px</strong>
+                </div>
+                <div>
+                  <span className="meta-label">Model fit</span>
+                  <strong>{formatNumber(telemetry.model_fit_error_m, 5)} m</strong>
+                </div>
+                <div>
+                  <span className="meta-label">LED model scale</span>
+                  <strong>{formatNumber(telemetry.scale_factor, 5)}x</strong>
+                </div>
+              </div>
+
+              <div className="meta-row">
+                <div>
+                  <span className="meta-label">LEDs per camera</span>
+                  <strong>{telemetry.detected_leds_per_camera.join(' / ')}</strong>
+                </div>
+                <div>
+                  <span className="meta-label">Camera IDs</span>
+                  <strong>{system.cameraIds.length ? system.cameraIds.join(', ') : 'Unavailable'}</strong>
+                </div>
+              </div>
+
+              <div className="led-coords">
+                <span className="meta-label">Solved LED coordinates (world)</span>
+                {telemetry.solved_led_coordinates?.length ? (
+                  telemetry.solved_led_coordinates.map((led) => (
+                    <strong key={led.label}>
+                      {led.label}: ({formatNumber(led.x, 4)}, {formatNumber(led.y, 4)}, {formatNumber(led.z, 4)})
+                    </strong>
+                  ))
+                ) : (
+                  <strong>No solved points</strong>
+                )}
+              </div>
+            </DisclosureSection>
+          </article>
+
+          <article className="panel panel-scene">
+            <div className="panel-heading">
               <div>
-                <span className="meta-label">LEDs per camera</span>
-                <strong>{telemetry.detected_leds_per_camera.join(' / ')}</strong>
+                <p className="panel-label">Motion</p>
+                <h2>Live flight trends</h2>
               </div>
             </div>
-
-            <div className="led-coords">
-              <span className="meta-label">Solved LED coordinates (world)</span>
-              {telemetry.solved_led_coordinates?.length ? (
-                telemetry.solved_led_coordinates.map((led) => (
-                  <strong key={led.label}>
-                    {led.label}: ({formatNumber(led.x, 4)}, {formatNumber(led.y, 4)}, {formatNumber(led.z, 4)})
-                  </strong>
-                ))
-              ) : (
-                <strong>No solved points</strong>
-              )}
-            </div>
+            <TrajectoryPanel telemetry={telemetry} samples={trajectorySamples} />
           </article>
 
           <article className="panel panel-cameras">
             <div className="panel-heading">
               <div>
-                <p className="panel-label">Vision</p>
-                <h2>Camera previews</h2>
+                <p className="panel-label">Monitoring</p>
+                <h2>Live camera previews</h2>
               </div>
             </div>
 
@@ -1766,26 +1954,29 @@ function App() {
             </div>
           </article>
 
-          <article className="panel panel-scene">
+          <article className="panel panel-poses">
             <div className="panel-heading">
               <div>
-                <p className="panel-label">Trajectory</p>
-                <h2>Live motion plots</h2>
+                <p className="panel-label">Space</p>
+                <h2>3D room view</h2>
               </div>
             </div>
-            <TrajectoryPanel telemetry={telemetry} samples={trajectorySamples} />
+            <CameraPoseScene cameraPoses={system.cameraPoses} telemetry={telemetry} />
           </article>
 
-          <article className="panel panel-pid">
-            <div className="panel-heading panel-heading-emphasis">
+          <details className="panel disclosure-panel panel-pid">
+            <summary className="panel-summary">
               <div>
-                <p className="panel-label">Hover tuning</p>
-                <h2>Outer and inner PID loops</h2>
+                <p className="panel-label">Advanced</p>
+                <h2>PID tuning</h2>
               </div>
-              <div className="panel-actions">
-                <span className={`mini-badge ${isDirty ? 'dirty' : 'clean'}`}>
-                  {isDirty ? 'Unsaved changes' : 'Synced'}
-                </span>
+              <span className={`mini-badge ${isDirty ? 'pending' : 'clean'}`}>
+                {isDirty ? 'Pending changes' : 'Synced'}
+              </span>
+            </summary>
+
+            <div className="panel-body">
+              <div className="panel-actions panel-actions-inline">
                 <button className="ghost-button" onClick={captureCurrentPoseAsTarget}>
                   Use current pose
                 </button>
@@ -1793,99 +1984,130 @@ function App() {
                   Apply tuning
                 </button>
               </div>
-            </div>
 
-            <div className="pid-summary-grid">
-              {snapshotCards.map((card) => (
-                <SnapshotCard key={card.label} {...card} />
-              ))}
-            </div>
-
-            <div className="pid-focus-banner">
-              <div>
-                <span className="meta-label">Workflow</span>
-                <strong>Tune the cascade outside-in</strong>
+              <div className="pid-summary-grid">
+                {snapshotCards.map((card) => (
+                  <SnapshotCard key={card.label} {...card} />
+                ))}
               </div>
-              <p>
-                Start with the shared XY and Z position gains, then tune the XY and Z velocity
-                damping stage borrowed from Low-Cost-Mocap, and only then tighten the MPU6050-backed
-                roll, pitch, and yaw-rate loops. In this project that cascade feeds our direct motor
-                mixer instead of an external SBUS flight controller.
-              </p>
-            </div>
 
-            <div className="pid-loops-grid">
-              <section className="loop-section">
-                <div className="loop-head">
-                  <div>
-                    <span className="meta-label">Outer loop</span>
-                    <strong>World-frame position, heading, and velocity</strong>
-                  </div>
-                  <p>The X and Y cards intentionally share one XY position profile, followed by separate XY and Z velocity damping cards.</p>
+              <div className="pid-focus-banner">
+                <div>
+                  <span className="meta-label">Workflow</span>
+                  <strong>Tune the cascade outside-in</strong>
                 </div>
-                <div className="pid-card-grid">
-                  {outerLoopCards.map((card) => (
-                    <PidAxisCard
-                      key={card.id}
-                      tone="outer"
-                      axisLabel={card.axisLabel}
-                      title={card.title}
-                      description={card.description}
-                      pid={localControl.pid[card.pidAxis] ?? DEFAULT_PID[card.pidAxis]}
-                      step={card.step}
-                      liveLabel={card.liveLabel}
-                      liveValue={card.liveValue}
-                      liveDigits={card.liveDigits}
-                      targetLabel={card.targetLabel}
-                      targetValue={card.targetValue}
-                      targetDigits={card.targetDigits}
-                      errorLabel={card.errorLabel}
-                      errorValue={card.errorValue}
-                      errorDigits={card.errorDigits}
-                      unit={card.unit}
-                      note={card.note}
-                      onChange={(term, value) => updatePidValue(card.pidAxis, term, value)}
-                    />
-                  ))}
-                </div>
-              </section>
+                <p>
+                  Start with the shared XY and Z position gains, then tune the XY and Z velocity
+                  damping stage borrowed from Low-Cost-Mocap, and only then tighten the
+                  MPU6050-backed roll, pitch, and yaw-rate loops. In this project that cascade
+                  feeds our direct motor mixer instead of an external SBUS flight controller.
+                </p>
+              </div>
 
-              <section className="loop-section">
-                <div className="loop-head">
-                  <div>
-                    <span className="meta-label">Inner loop</span>
-                    <strong>IMU attitude stabilization</strong>
+              <div className="pid-loops-grid">
+                <section className="loop-section">
+                  <div className="loop-head">
+                    <div>
+                      <span className="meta-label">Outer loop</span>
+                      <strong>World-frame position, heading, and velocity</strong>
+                    </div>
+                    <p>
+                      The X and Y cards intentionally share one XY position profile, followed by
+                      separate XY and Z velocity damping cards.
+                    </p>
                   </div>
-                  <p>These gains are faster and smaller. Use them to clean up attitude response once the hover point is already calm.</p>
-                </div>
-                <div className="pid-card-grid">
-                  {innerLoopCards.map((card) => (
-                    <PidAxisCard
-                      key={card.axis}
-                      tone="inner"
-                      axisLabel={card.axisLabel}
-                      title={card.title}
-                      description={card.description}
-                      pid={localControl.pid[card.axis] ?? DEFAULT_PID[card.axis]}
-                      step={card.step}
-                      liveLabel={card.liveLabel}
-                      liveValue={card.liveValue}
-                      liveDigits={card.liveDigits}
-                      targetLabel={card.targetLabel}
-                      targetValue={card.targetValue}
-                      targetDigits={card.targetDigits}
-                      errorLabel={card.errorLabel}
-                      errorValue={card.errorValue}
-                      errorDigits={card.errorDigits}
-                      unit={card.unit}
-                      note={card.note}
-                      onChange={(term, value) => updatePidValue(card.axis, term, value)}
-                    />
-                  ))}
-                </div>
-              </section>
+                  <div className="pid-card-grid">
+                    {outerLoopCards.map((card) => (
+                      <PidAxisCard
+                        key={card.id}
+                        tone="outer"
+                        axisLabel={card.axisLabel}
+                        title={card.title}
+                        description={card.description}
+                        pid={localControl.pid[card.pidAxis] ?? DEFAULT_PID[card.pidAxis]}
+                        step={card.step}
+                        liveLabel={card.liveLabel}
+                        liveValue={card.liveValue}
+                        liveDigits={card.liveDigits}
+                        targetLabel={card.targetLabel}
+                        targetValue={card.targetValue}
+                        targetDigits={card.targetDigits}
+                        errorLabel={card.errorLabel}
+                        errorValue={card.errorValue}
+                        errorDigits={card.errorDigits}
+                        unit={card.unit}
+                        note={card.note}
+                        onChange={(term, value) => updatePidValue(card.pidAxis, term, value)}
+                      />
+                    ))}
+                  </div>
+                </section>
+
+                <section className="loop-section">
+                  <div className="loop-head">
+                    <div>
+                      <span className="meta-label">Inner loop</span>
+                      <strong>IMU attitude stabilization</strong>
+                    </div>
+                    <p>
+                      These gains are faster and smaller. Use them to clean up attitude response
+                      once the hover point is already calm.
+                    </p>
+                  </div>
+                  <div className="pid-card-grid">
+                    {innerLoopCards.map((card) => (
+                      <PidAxisCard
+                        key={card.axis}
+                        tone="inner"
+                        axisLabel={card.axisLabel}
+                        title={card.title}
+                        description={card.description}
+                        pid={localControl.pid[card.axis] ?? DEFAULT_PID[card.axis]}
+                        step={card.step}
+                        liveLabel={card.liveLabel}
+                        liveValue={card.liveValue}
+                        liveDigits={card.liveDigits}
+                        targetLabel={card.targetLabel}
+                        targetValue={card.targetValue}
+                        targetDigits={card.targetDigits}
+                        errorLabel={card.errorLabel}
+                        errorValue={card.errorValue}
+                        errorDigits={card.errorDigits}
+                        unit={card.unit}
+                        note={card.note}
+                        onChange={(term, value) => updatePidValue(card.axis, term, value)}
+                      />
+                    ))}
+                  </div>
+                </section>
+              </div>
             </div>
-          </article>
+          </details>
+
+          <details className="panel disclosure-panel panel-payload">
+            <summary className="panel-summary">
+              <div>
+                <p className="panel-label">Advanced</p>
+                <h2>Serial payload and debug</h2>
+              </div>
+              <span className={`mini-badge ${payloadTone}`}>{payloadStatusLabel}</span>
+            </summary>
+
+            <div className="panel-body">
+              <div className="system-list compact">
+                <div>
+                  <span>Serial path</span>
+                  <strong>{system.serialForwarding ? 'Forwarding live' : system.canSendToEsp32 ? 'Ready' : 'Blocked'}</strong>
+                </div>
+                <div>
+                  <span>Last send</span>
+                  <strong>{system.lastSerialSendError || (system.lastSerialSendOk ? 'Successful' : 'Waiting')}</strong>
+                </div>
+              </div>
+
+              <pre>{debugPayloadText}</pre>
+            </div>
+          </details>
         </section>
       </main>
     </div>
