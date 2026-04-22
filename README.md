@@ -79,6 +79,7 @@ Flash `esp32-s3-sender/esp32-s3-sender.ino` to the USB-connected ESP32-S3 sender
 Flash `esp32-s3-receiver/esp32-s3-receiver.ino` to the vehicle-side ESP32-S3 receiver. It:
 
 - receives the forwarded mocap control payload over ESP-NOW
+- accepts newline-delimited USB serial payloads for direct manual override
 - parses target, pose, limit, and PID data
 - runs the outer-loop controller on the receiver side
 - emits CRSF-style RC channel output to the flight controller over `Serial2`
@@ -95,6 +96,12 @@ Setup notes:
 - Copy that MAC address into `DRONE_MAC_ADDRESS` in `esp32-s3-sender/esp32-s3-sender.ino`.
 - Confirm the receiver-side CRSF scaling and angle/rate limits match the Betaflight configuration on the flight controller.
 - ESP-NOW payloads in this implementation remain constrained by the standard ESP-NOW payload limit.
+- The receiver now also accepts newline-terminated USB serial JSON for manual testing. Fresh manual payloads override ESP-NOW until you send `{"manual":0}`.
+- Normalized manual control example: `{"manual":1,"arm":1,"axes":[0,0,0.05,0]}` where the axes are `[roll, pitch, throttle, yaw]`, roll/pitch/yaw are in `[-1, 1]`, and throttle is in `[0, 1]`.
+- Named-field manual control is also accepted, for example `{"manual":1,"arm":1,"throttle":0.05}` or `{"arm":1,"roll":0.1,"yaw":-0.1}` once manual mode is already enabled.
+- Raw RC passthrough is also supported with `{"manual":1,"arm":1,"rc":[1500,1500,1050,1500]}` using `[roll, pitch, throttle, yaw]` values in the `1000-2000` range.
+- For bench testing, the receiver now performs a short arm-assist sequence: when manual arming first starts, it holds throttle at RC `1000` for about `1.2 s`, then applies your requested throttle. This makes a single payload such as `{"manual":1,"arm":1,"rc":[1500,1500,1100,1500]}` practical for testing.
+- Manual USB override now times out after roughly `5 s`, which makes bench testing from a serial monitor practical. The normal ESP-NOW outer-loop timeout remains `250 ms`.
 
 ## Running the System
 

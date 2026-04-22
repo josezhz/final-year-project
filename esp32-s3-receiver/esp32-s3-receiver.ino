@@ -9,7 +9,13 @@ constexpr unsigned long FC_BAUD_RATE = 420000;
 constexpr unsigned long SERIAL_WAIT_MS = 2000;
 constexpr unsigned long STATUS_PRINT_INTERVAL_MS = 1000;
 constexpr unsigned long COMMAND_TIMEOUT_MS = 250;
+// Keep manual USB testing human-friendly without changing the outer-loop timeout.
+constexpr unsigned long MANUAL_COMMAND_TIMEOUT_MS = 5000;
+// When manual arming starts, briefly keep throttle low so Betaflight can arm.
+constexpr unsigned long MANUAL_ARM_THROTTLE_HOLD_MS = 1200;
+constexpr uint16_t MANUAL_ARM_LOW_THROTTLE_RC = 1000;
 constexpr size_t MAX_PAYLOAD_LENGTH = 251;
+constexpr size_t MAX_SERIAL_FRAME_LENGTH = MAX_PAYLOAD_LENGTH - 1;
 
 constexpr uint8_t FC_RX_PIN = 7;
 constexpr uint8_t FC_TX_PIN = 6;
@@ -57,11 +63,30 @@ struct FlightCommand {
   float maxYawRateDeg;
 };
 
+struct ManualControlCommand {
+  bool enabled;
+  bool armed;
+  bool useRawRc;
+  float roll;
+  float pitch;
+  float throttle;
+  float yaw;
+  uint16_t rawRoll;
+  uint16_t rawPitch;
+  uint16_t rawThrottle;
+  uint16_t rawYaw;
+};
+
 portMUX_TYPE payloadMux = portMUX_INITIALIZER_UNLOCKED;
 char pendingPayload[MAX_PAYLOAD_LENGTH] = {};
 volatile bool pendingPayloadReady = false;
 
 FlightCommand flightCommand = {};
+ManualControlCommand manualControl = {};
+
+char incomingSerialFrame[MAX_SERIAL_FRAME_LENGTH + 1] = {};
+size_t incomingSerialFrameLength = 0;
+bool incomingSerialFrameOverflow = false;
 
 PidState posXPid = {};
 PidState posYPid = {};
@@ -72,7 +97,11 @@ PidState yVelPid = {};
 PidState zVelPid = {};
 
 unsigned long lastCommandRxMs = 0;
+unsigned long lastManualCommandRxMs = 0;
 unsigned long lastStatusPrintMs = 0;
+unsigned long manualArmThrottleHoldStartedMs = 0;
+bool manualArmCommandLatched = false;
+bool manualArmThrottleHoldActive = false;
 
 uint16_t lastRcRoll = 1500;
 uint16_t lastRcPitch = 1500;
@@ -86,6 +115,12 @@ float lastDesiredWorldZVelocity = 0.0f;
 float lastDesiredYawRate = 0.0f;
 float lastDesiredRollDeg = 0.0f;
 float lastDesiredPitchDeg = 0.0f;
+
+void resetManualArmAssist() {
+  manualArmCommandLatched = false;
+  manualArmThrottleHoldActive = false;
+  manualArmThrottleHoldStartedMs = 0;
+}
 
 float clampf(float value, float minValue, float maxValue) {
   if (value < minValue) {
@@ -110,6 +145,22 @@ float wrapDegrees(float angle) {
 PidGains makePidGains(float kp, float ki, float kd) {
   PidGains gains = {kp, ki, kd};
   return gains;
+}
+
+ManualControlCommand makeDefaultManualControl() {
+  ManualControlCommand command = {};
+  command.enabled = false;
+  command.armed = false;
+  command.useRawRc = false;
+  command.roll = 0.0f;
+  command.pitch = 0.0f;
+  command.throttle = 0.0f;
+  command.yaw = 0.0f;
+  command.rawRoll = 1500;
+  command.rawPitch = 1500;
+  command.rawThrottle = 1000;
+  command.rawYaw = 1500;
+  return command;
 }
 
 FlightCommand makeDefaultFlightCommand() {
@@ -197,6 +248,10 @@ uint16_t throttleToRc(float normalizedThrottle) {
   return static_cast<uint16_t>(1000.0f + (throttle * 1000.0f));
 }
 
+float rcAxisToNormalized(uint16_t rcValue) {
+  return clampf((static_cast<float>(rcValue) - 1500.0f) / 500.0f, -1.0f, 1.0f);
+}
+
 bool parseBoolFlag(const char *json, const char *key, bool &value) {
   const char *cursor = strstr(json, key);
   if (cursor == nullptr) {
@@ -254,6 +309,18 @@ bool parseFloatArray(const char *json, const char *key, float *values, size_t co
 
   cursor = strchr(cursor, ']');
   return cursor != nullptr;
+}
+
+bool parseFloatValue(const char *json, const char *key, float &value) {
+  const char *cursor = strstr(json, key);
+  if (cursor == nullptr) {
+    return false;
+  }
+
+  cursor += strlen(key);
+  char *parseEnd = nullptr;
+  value = strtof(cursor, &parseEnd);
+  return parseEnd != cursor;
 }
 
 bool parseBoolFlagEither(const char *json, const char *primaryKey, const char *fallbackKey, bool &value) {
@@ -351,6 +418,64 @@ bool parseFlightCommandPayload(const char *payload, FlightCommand &nextCommand) 
   parsed.maxThrottle = clampf(limits[2], parsed.hoverThrottle, 1.0f);
   parsed.maxTiltDeg = clampf(limits[3], 1.0f, 45.0f);
   parsed.maxYawRateDeg = clampf(limits[4], 1.0f, 360.0f);
+
+  nextCommand = parsed;
+  return true;
+}
+
+bool parseManualControlPayload(const char *payload, ManualControlCommand &nextCommand) {
+  ManualControlCommand parsed = manualControl;
+  float axes[4] = {parsed.roll, parsed.pitch, parsed.throttle, parsed.yaw};
+  float rawAxes[4] = {
+    static_cast<float>(parsed.rawRoll),
+    static_cast<float>(parsed.rawPitch),
+    static_cast<float>(parsed.rawThrottle),
+    static_cast<float>(parsed.rawYaw),
+  };
+
+  bool manualEnabled = parsed.enabled;
+  const bool hasManualFlag = parseBoolFlagEither(payload, "\"manual\":", "\"man\":", manualEnabled);
+  const bool hasAxesArray = parseFloatArrayEither(payload, "\"c\":", "\"axes\":", axes, 4);
+  const bool hasRawArray = parseFloatArrayEither(payload, "\"rc\":", "\"raw\":", rawAxes, 4);
+  const bool hasRoll = parseFloatValue(payload, "\"roll\":", axes[0]);
+  const bool hasPitch = parseFloatValue(payload, "\"pitch\":", axes[1]);
+  const bool hasThrottle = parseFloatValue(payload, "\"throttle\":", axes[2]);
+  const bool hasYaw = parseFloatValue(payload, "\"yaw\":", axes[3]);
+  const bool hasNamedAxes = hasRoll || hasPitch || hasThrottle || hasYaw;
+  const bool hasArmFlag = parseBoolFlagEither(payload, "\"a\":", "\"arm\":", parsed.armed);
+  const bool hasControlValues = hasAxesArray || hasRawArray || hasNamedAxes;
+
+  if (!(hasManualFlag || hasControlValues || (parsed.enabled && hasArmFlag))) {
+    return false;
+  }
+
+  if (!hasManualFlag && (hasControlValues || (parsed.enabled && hasArmFlag))) {
+    manualEnabled = true;
+  }
+
+  parsed.enabled = manualEnabled;
+  if (!parsed.enabled) {
+    parsed.armed = false;
+    parsed.useRawRc = false;
+    nextCommand = parsed;
+    return true;
+  }
+
+  if (hasAxesArray || hasNamedAxes) {
+    parsed.roll = clampf(axes[0], -1.0f, 1.0f);
+    parsed.pitch = clampf(axes[1], -1.0f, 1.0f);
+    parsed.throttle = clampf(axes[2], 0.0f, 1.0f);
+    parsed.yaw = clampf(axes[3], -1.0f, 1.0f);
+    parsed.useRawRc = false;
+  }
+
+  if (hasRawArray) {
+    parsed.rawRoll = static_cast<uint16_t>(clampf(rawAxes[0], 1000.0f, 2000.0f));
+    parsed.rawPitch = static_cast<uint16_t>(clampf(rawAxes[1], 1000.0f, 2000.0f));
+    parsed.rawThrottle = static_cast<uint16_t>(clampf(rawAxes[2], 1000.0f, 2000.0f));
+    parsed.rawYaw = static_cast<uint16_t>(clampf(rawAxes[3], 1000.0f, 2000.0f));
+    parsed.useRawRc = true;
+  }
 
   nextCommand = parsed;
   return true;
@@ -471,24 +596,143 @@ void sendSafeDisarmedFrame() {
   sendCRSF(lastRcRoll, lastRcPitch, lastRcThrottle, lastRcYaw, lastRcArm);
 }
 
-void processIncomingPayloads() {
+bool applyFlightCommandPayload(const char *payload, const char *sourceLabel) {
+  FlightCommand nextCommand = flightCommand;
+  if (!parseFlightCommandPayload(payload, nextCommand)) {
+    Serial.print("Failed to parse ");
+    Serial.print(sourceLabel);
+    Serial.print(" payload: ");
+    Serial.println(payload);
+    return false;
+  }
+
+  flightCommand = nextCommand;
+  lastCommandRxMs = millis();
+  return true;
+}
+
+bool applyUsbSerialPayload(const char *payload) {
+  ManualControlCommand nextManual = manualControl;
+  if (parseManualControlPayload(payload, nextManual)) {
+    manualControl = nextManual;
+    lastManualCommandRxMs = millis();
+    return true;
+  }
+
+  return applyFlightCommandPayload(payload, "USB serial");
+}
+
+void processIncomingSerialFrame() {
+  if (incomingSerialFrameOverflow || incomingSerialFrameLength == 0) {
+    if (incomingSerialFrameOverflow) {
+      Serial.println("Dropped oversized USB serial payload.");
+    }
+    incomingSerialFrameLength = 0;
+    incomingSerialFrameOverflow = false;
+    return;
+  }
+
+  incomingSerialFrame[incomingSerialFrameLength] = '\0';
+  applyUsbSerialPayload(incomingSerialFrame);
+  incomingSerialFrameLength = 0;
+  incomingSerialFrameOverflow = false;
+}
+
+void processIncomingSerial() {
+  while (Serial.available() > 0) {
+    const char incomingByte = static_cast<char>(Serial.read());
+    if (incomingByte == '\r') {
+      continue;
+    }
+    if (incomingByte == '\n') {
+      processIncomingSerialFrame();
+      continue;
+    }
+
+    if (incomingSerialFrameOverflow) {
+      continue;
+    }
+    if (incomingSerialFrameLength >= MAX_SERIAL_FRAME_LENGTH) {
+      incomingSerialFrameOverflow = true;
+      continue;
+    }
+
+    incomingSerialFrame[incomingSerialFrameLength++] = incomingByte;
+  }
+}
+
+void processIncomingEspNowPayloads() {
   char payloadBuffer[MAX_PAYLOAD_LENGTH] = {};
   if (!pullPendingPayload(payloadBuffer, sizeof(payloadBuffer))) {
     return;
   }
 
-  FlightCommand nextCommand = flightCommand;
-  if (!parseFlightCommandPayload(payloadBuffer, nextCommand)) {
-    Serial.print("Failed to parse command payload: ");
-    Serial.println(payloadBuffer);
-    return;
+  applyFlightCommandPayload(payloadBuffer, "ESP-NOW");
+}
+
+bool runManualControlToFlightController() {
+  if (!manualControl.enabled) {
+    resetManualArmAssist();
+    return false;
   }
 
-  flightCommand = nextCommand;
-  lastCommandRxMs = millis();
+  resetAllPidStates();
+
+  const bool manualFresh = (millis() - lastManualCommandRxMs) <= MANUAL_COMMAND_TIMEOUT_MS;
+  if (!manualFresh || !manualControl.armed) {
+    resetManualArmAssist();
+    sendSafeDisarmedFrame();
+    return true;
+  }
+
+  if (!manualArmCommandLatched) {
+    manualArmCommandLatched = true;
+    manualArmThrottleHoldActive = true;
+    manualArmThrottleHoldStartedMs = millis();
+  }
+  if (
+    manualArmThrottleHoldActive
+    && (millis() - manualArmThrottleHoldStartedMs) >= MANUAL_ARM_THROTTLE_HOLD_MS
+  ) {
+    manualArmThrottleHoldActive = false;
+  }
+
+  float rollNormalized = manualControl.roll;
+  float pitchNormalized = manualControl.pitch;
+  float yawNormalized = manualControl.yaw;
+  uint16_t desiredThrottleRc = throttleToRc(manualControl.throttle);
+
+  if (manualControl.useRawRc) {
+    lastRcRoll = manualControl.rawRoll;
+    lastRcPitch = manualControl.rawPitch;
+    desiredThrottleRc = manualControl.rawThrottle;
+    lastRcYaw = manualControl.rawYaw;
+    rollNormalized = rcAxisToNormalized(lastRcRoll);
+    pitchNormalized = rcAxisToNormalized(lastRcPitch);
+    yawNormalized = rcAxisToNormalized(lastRcYaw);
+  } else {
+    lastRcRoll = normalizedAxisToRc(rollNormalized, RC_ROLL_SIGN);
+    lastRcPitch = normalizedAxisToRc(pitchNormalized, RC_PITCH_SIGN);
+    lastRcYaw = normalizedAxisToRc(yawNormalized, RC_YAW_SIGN);
+  }
+
+  lastRcThrottle = manualArmThrottleHoldActive ? MANUAL_ARM_LOW_THROTTLE_RC : desiredThrottleRc;
+  lastRcArm = 2000;
+  lastDesiredWorldXVelocity = 0.0f;
+  lastDesiredWorldYVelocity = 0.0f;
+  lastDesiredWorldZVelocity = 0.0f;
+  lastDesiredRollDeg = rollNormalized * FC_FULL_SCALE_TILT_DEG;
+  lastDesiredPitchDeg = pitchNormalized * FC_FULL_SCALE_TILT_DEG;
+  lastDesiredYawRate = yawNormalized * FC_FULL_SCALE_YAW_RATE_DEG;
+  sendCRSF(lastRcRoll, lastRcPitch, lastRcThrottle, lastRcYaw, lastRcArm);
+  return true;
 }
 
 void runOuterLoopToFlightController(float dtSeconds) {
+  if (runManualControlToFlightController()) {
+    return;
+  }
+
   const bool commandFresh = (millis() - lastCommandRxMs) <= COMMAND_TIMEOUT_MS;
   const bool controlReady = commandFresh && flightCommand.armed && flightCommand.spatialValid;
 
@@ -592,12 +836,37 @@ void printStatus() {
   }
   lastStatusPrintMs = millis();
 
-  const bool commandFresh = (millis() - lastCommandRxMs) <= COMMAND_TIMEOUT_MS;
+  const bool autoFresh = (millis() - lastCommandRxMs) <= COMMAND_TIMEOUT_MS;
+  const bool manualFresh = manualControl.enabled && ((millis() - lastManualCommandRxMs) <= MANUAL_COMMAND_TIMEOUT_MS);
+  const char *mode = "safe";
+  if (manualControl.enabled) {
+    if (!manualFresh) {
+      mode = "manual_timeout";
+    } else if (!manualControl.armed) {
+      mode = "manual_disarmed";
+    } else if (manualArmThrottleHoldActive) {
+      mode = "manual_arm_hold";
+    } else {
+      mode = "manual";
+    }
+  } else if (autoFresh && flightCommand.armed && flightCommand.spatialValid) {
+    mode = "outer";
+  } else if (autoFresh && !flightCommand.armed) {
+    mode = "auto_disarmed";
+  } else if (autoFresh && !flightCommand.spatialValid) {
+    mode = "waiting_pose";
+  }
+
   Serial.printf(
-    "fresh=%d armed=%d ok=%d pos=(%.2f,%.2f,%.2f) vel=(%.2f,%.2f,%.2f) yaw=%.1f target=(%.2f,%.2f,%.2f|%.1f) outerVel=(%.2f,%.2f,%.2f) tilt=(%.1f,%.1f) yawRate=%.1f rc=(%u,%u,%u,%u,%u)\n",
-    commandFresh ? 1 : 0,
+    "mode=%s autoFresh=%d autoArm=%d ok=%d manEn=%d manFresh=%d manArm=%d manRaw=%d pos=(%.2f,%.2f,%.2f) vel=(%.2f,%.2f,%.2f) yaw=%.1f target=(%.2f,%.2f,%.2f|%.1f) outerVel=(%.2f,%.2f,%.2f) tilt=(%.1f,%.1f) yawRate=%.1f rc=(%u,%u,%u,%u,%u)\n",
+    mode,
+    autoFresh ? 1 : 0,
     flightCommand.armed ? 1 : 0,
     flightCommand.spatialValid ? 1 : 0,
+    manualControl.enabled ? 1 : 0,
+    manualFresh ? 1 : 0,
+    manualControl.armed ? 1 : 0,
+    manualControl.useRawRc ? 1 : 0,
     flightCommand.position[0],
     flightCommand.position[1],
     flightCommand.position[2],
@@ -625,6 +894,7 @@ void printStatus() {
 
 void setup() {
   flightCommand = makeDefaultFlightCommand();
+  manualControl = makeDefaultManualControl();
   resetAllPidStates();
 
   Serial.begin(USB_BAUD_RATE);
@@ -635,9 +905,9 @@ void setup() {
 
   delay(250);
   Serial.println();
-  Serial.println("ESP32-S2 mocap receiver starting...");
+  Serial.println("ESP32-S3 mocap receiver starting...");
   WiFi.mode(WIFI_STA);
-  Serial.print("ESP32-S2 MAC: ");
+  Serial.print("ESP32-S3 MAC: ");
   Serial.println(WiFi.macAddress());
 
   Serial2.begin(FC_BAUD_RATE, SERIAL_8N1, FC_RX_PIN, FC_TX_PIN);
@@ -647,7 +917,13 @@ void setup() {
     Serial.println("ESP-NOW receiver failed to initialise.");
   }
 
-  Serial.println("Receiver ready. Waiting for compact mocap control payloads.");
+  Serial.println("Receiver ready. Waiting for ESP-NOW mocap payloads or USB serial manual commands.");
+  Serial.println("Manual USB example: {\"manual\":1,\"arm\":1,\"axes\":[0,0,0,0]}");
+  Serial.printf("Manual USB timeout: %lu ms\n", static_cast<unsigned long>(MANUAL_COMMAND_TIMEOUT_MS));
+  Serial.printf("Manual arm hold: %lu ms at RC throttle %u\n",
+    static_cast<unsigned long>(MANUAL_ARM_THROTTLE_HOLD_MS),
+    static_cast<unsigned>(MANUAL_ARM_LOW_THROTTLE_RC)
+  );
 }
 
 void loop() {
@@ -657,7 +933,8 @@ void loop() {
   lastLoopMicros = nowMicros;
   dtSeconds = clampf(dtSeconds, 0.001f, 0.02f);
 
-  processIncomingPayloads();
+  processIncomingSerial();
+  processIncomingEspNowPayloads();
   runOuterLoopToFlightController(dtSeconds);
   printStatus();
 
