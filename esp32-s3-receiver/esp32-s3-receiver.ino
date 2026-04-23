@@ -9,6 +9,7 @@ constexpr unsigned long FC_BAUD_RATE = 420000;
 constexpr unsigned long SERIAL_WAIT_MS = 2000;
 constexpr unsigned long STATUS_PRINT_INTERVAL_MS = 1000;
 constexpr unsigned long COMMAND_TIMEOUT_MS = 250;
+constexpr unsigned long FC_ATTITUDE_TIMEOUT_MS = 500;
 // Keep manual USB testing human-friendly without changing the outer-loop timeout.
 constexpr unsigned long MANUAL_COMMAND_TIMEOUT_MS = 5000;
 // When manual arming starts, briefly keep throttle low so Betaflight can arm.
@@ -16,11 +17,15 @@ constexpr unsigned long MANUAL_ARM_THROTTLE_HOLD_MS = 1200;
 constexpr uint16_t MANUAL_ARM_LOW_THROTTLE_RC = 1000;
 constexpr size_t MAX_PAYLOAD_LENGTH = 251;
 constexpr size_t MAX_SERIAL_FRAME_LENGTH = MAX_PAYLOAD_LENGTH - 1;
+constexpr size_t CRSF_MAX_FRAME_LENGTH = 64;
+constexpr uint8_t CRSF_FRAME_TYPE_ATTITUDE = 0x1E;
 
-constexpr uint8_t FC_RX_PIN = 7;
-constexpr uint8_t FC_TX_PIN = 6;
+constexpr uint8_t UART2_RX_PIN = 7;
+constexpr uint8_t UART2_TX_PIN = 6;
 
 constexpr float DEG_TO_RAD_F = 0.0174532925f;
+constexpr float RAD_TO_DEG_F = 57.2957795f;
+constexpr float CRSF_ATTITUDE_LSB_RAD = 0.0001f;
 constexpr float MAX_WORLD_XY_VELOCITY_MPS = 0.8f;
 constexpr float MAX_WORLD_Z_VELOCITY_MPS = 0.5f;
 // Match these to the flight-controller's configured angle/rate limits.
@@ -115,6 +120,14 @@ float lastDesiredWorldZVelocity = 0.0f;
 float lastDesiredYawRate = 0.0f;
 float lastDesiredRollDeg = 0.0f;
 float lastDesiredPitchDeg = 0.0f;
+float lastFcPitchDeg = 0.0f;
+float lastFcRollDeg = 0.0f;
+float lastFcYawDeg = 0.0f;
+unsigned long lastFcAttitudeRxMs = 0;
+
+uint8_t incomingCrsfFrame[CRSF_MAX_FRAME_LENGTH] = {};
+size_t incomingCrsfFrameLength = 0;
+size_t incomingCrsfFrameExpectedLength = 0;
 
 void resetManualArmAssist() {
   manualArmCommandLatched = false;
@@ -140,6 +153,12 @@ float wrapDegrees(float angle) {
     angle += 360.0f;
   }
   return angle;
+}
+
+int16_t readInt16BigEndian(const uint8_t *data) {
+  return static_cast<int16_t>(
+    (static_cast<uint16_t>(data[0]) << 8) | static_cast<uint16_t>(data[1])
+  );
 }
 
 PidGains makePidGains(float kp, float ki, float kd) {
@@ -525,7 +544,7 @@ bool initEspNowReceiver() {
   return true;
 }
 
-uint8_t crsf_crc8(uint8_t *data, uint8_t len) {
+uint8_t crsf_crc8(const uint8_t *data, uint8_t len) {
   uint8_t crc = 0;
   for (uint8_t i = 0; i < len; ++i) {
     crc ^= data[i];
@@ -538,6 +557,81 @@ uint8_t crsf_crc8(uint8_t *data, uint8_t len) {
     }
   }
   return crc;
+}
+
+void handleFlightControllerCrsfFrame(const uint8_t *frame, size_t frameLength) {
+  if (frameLength < 4) {
+    return;
+  }
+
+  const uint8_t payloadLength = frame[1];
+  if (payloadLength < 2 || frameLength != static_cast<size_t>(payloadLength) + 2) {
+    return;
+  }
+
+  const uint8_t receivedCrc = frame[frameLength - 1];
+  const uint8_t calculatedCrc = crsf_crc8(&frame[2], payloadLength - 1);
+  if (receivedCrc != calculatedCrc) {
+    return;
+  }
+
+  const uint8_t frameType = frame[2];
+  const uint8_t *payload = &frame[3];
+  const size_t payloadSize = payloadLength - 2;
+  if (frameType != CRSF_FRAME_TYPE_ATTITUDE || payloadSize < 6) {
+    return;
+  }
+
+  lastFcPitchDeg = wrapDegrees(
+    static_cast<float>(readInt16BigEndian(payload)) * CRSF_ATTITUDE_LSB_RAD * RAD_TO_DEG_F
+  );
+  lastFcRollDeg = wrapDegrees(
+    static_cast<float>(readInt16BigEndian(payload + 2)) * CRSF_ATTITUDE_LSB_RAD * RAD_TO_DEG_F
+  );
+  lastFcYawDeg = wrapDegrees(
+    static_cast<float>(readInt16BigEndian(payload + 4)) * CRSF_ATTITUDE_LSB_RAD * RAD_TO_DEG_F
+  );
+  lastFcAttitudeRxMs = millis();
+}
+
+void processFlightControllerTelemetry() {
+  while (Serial2.available() > 0) {
+    const uint8_t incomingByte = static_cast<uint8_t>(Serial2.read());
+
+    if (incomingCrsfFrameLength == 0) {
+      incomingCrsfFrame[incomingCrsfFrameLength++] = incomingByte;
+      continue;
+    }
+
+    if (incomingCrsfFrameLength == 1) {
+      if (incomingByte < 2 || incomingByte > (CRSF_MAX_FRAME_LENGTH - 2)) {
+        incomingCrsfFrame[0] = incomingByte;
+        incomingCrsfFrameLength = 1;
+        incomingCrsfFrameExpectedLength = 0;
+        continue;
+      }
+
+      incomingCrsfFrame[incomingCrsfFrameLength++] = incomingByte;
+      incomingCrsfFrameExpectedLength = static_cast<size_t>(incomingByte) + 2;
+      continue;
+    }
+
+    if (incomingCrsfFrameLength >= CRSF_MAX_FRAME_LENGTH) {
+      incomingCrsfFrameLength = 0;
+      incomingCrsfFrameExpectedLength = 0;
+      continue;
+    }
+
+    incomingCrsfFrame[incomingCrsfFrameLength++] = incomingByte;
+    if (
+      incomingCrsfFrameExpectedLength > 0
+      && incomingCrsfFrameLength >= incomingCrsfFrameExpectedLength
+    ) {
+      handleFlightControllerCrsfFrame(incomingCrsfFrame, incomingCrsfFrameLength);
+      incomingCrsfFrameLength = 0;
+      incomingCrsfFrameExpectedLength = 0;
+    }
+  }
 }
 
 void sendCRSF(uint16_t chRoll, uint16_t chPitch, uint16_t chThrottle, uint16_t chYaw, uint16_t chArm) {
@@ -838,6 +932,7 @@ void printStatus() {
 
   const bool autoFresh = (millis() - lastCommandRxMs) <= COMMAND_TIMEOUT_MS;
   const bool manualFresh = manualControl.enabled && ((millis() - lastManualCommandRxMs) <= MANUAL_COMMAND_TIMEOUT_MS);
+  const bool fcAttitudeFresh = (millis() - lastFcAttitudeRxMs) <= FC_ATTITUDE_TIMEOUT_MS;
   const char *mode = "safe";
   if (manualControl.enabled) {
     if (!manualFresh) {
@@ -858,7 +953,7 @@ void printStatus() {
   }
 
   Serial.printf(
-    "mode=%s autoFresh=%d autoArm=%d ok=%d manEn=%d manFresh=%d manArm=%d manRaw=%d pos=(%.2f,%.2f,%.2f) vel=(%.2f,%.2f,%.2f) yaw=%.1f target=(%.2f,%.2f,%.2f|%.1f) outerVel=(%.2f,%.2f,%.2f) tilt=(%.1f,%.1f) yawRate=%.1f rc=(%u,%u,%u,%u,%u)\n",
+    "mode=%s autoFresh=%d autoArm=%d ok=%d manEn=%d manFresh=%d manArm=%d manRaw=%d fcAttOk=%d fcAtt=(p=%.1f,r=%.1f,y=%.1f) pos=(%.2f,%.2f,%.2f) vel=(%.2f,%.2f,%.2f) yaw=%.1f target=(%.2f,%.2f,%.2f|%.1f) outerVel=(%.2f,%.2f,%.2f) tilt=(%.1f,%.1f) yawRate=%.1f rc=(%u,%u,%u,%u,%u)\n",
     mode,
     autoFresh ? 1 : 0,
     flightCommand.armed ? 1 : 0,
@@ -867,6 +962,10 @@ void printStatus() {
     manualFresh ? 1 : 0,
     manualControl.armed ? 1 : 0,
     manualControl.useRawRc ? 1 : 0,
+    fcAttitudeFresh ? 1 : 0,
+    lastFcPitchDeg,
+    lastFcRollDeg,
+    lastFcYawDeg,
     flightCommand.position[0],
     flightCommand.position[1],
     flightCommand.position[2],
@@ -910,7 +1009,7 @@ void setup() {
   Serial.print("ESP32-S3 MAC: ");
   Serial.println(WiFi.macAddress());
 
-  Serial2.begin(FC_BAUD_RATE, SERIAL_8N1, FC_RX_PIN, FC_TX_PIN);
+  Serial2.begin(FC_BAUD_RATE, SERIAL_8N1, UART2_RX_PIN, UART2_TX_PIN);
   sendSafeDisarmedFrame();
 
   if (!initEspNowReceiver()) {
@@ -935,6 +1034,7 @@ void loop() {
 
   processIncomingSerial();
   processIncomingEspNowPayloads();
+  processFlightControllerTelemetry();
   runOuterLoopToFlightController(dtSeconds);
   printStatus();
 
