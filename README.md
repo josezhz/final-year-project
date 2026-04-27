@@ -83,6 +83,7 @@ Flash `esp32-s3-receiver/esp32-s3-receiver.ino` to the vehicle-side ESP32-S3 rec
 - parses target, pose, limit, and PID data
 - runs the outer-loop controller on the receiver side
 - emits CRSF-style RC channel output to the flight controller over `Serial2`
+- forwards CRSF attitude telemetry back to the backend through the ESP-NOW sender as pitch/roll plots
 
 Current receiver-side wiring/constants of note:
 
@@ -101,6 +102,7 @@ Setup notes:
 - Named-field manual control is also accepted, for example `{"manual":1,"arm":1,"throttle":0.05}` or `{"arm":1,"roll":0.1,"yaw":-0.1}` once manual mode is already enabled.
 - Raw RC passthrough is also supported with `{"manual":1,"arm":1,"rc":[1500,1500,1050,1500]}` using `[roll, pitch, throttle, yaw]` values in the `1000-2000` range.
 - For bench testing, the receiver now performs a short arm-assist sequence: when manual arming first starts, it holds throttle at RC `1000` for about `1.2 s`, then applies your requested throttle. This makes a single payload such as `{"manual":1,"arm":1,"rc":[1500,1500,1100,1500]}` practical for testing.
+- Frontend/ESP-NOW arming uses the same short low-throttle assist before applying hover throttle, which gives Betaflight a clean arming window.
 - Manual USB override now times out after roughly `5 s`, which makes bench testing from a serial monitor practical. The normal ESP-NOW outer-loop timeout remains `250 ms`.
 
 ## Running the System

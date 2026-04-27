@@ -3,6 +3,7 @@
 #include <math.h>
 #include <cstring>
 #include <cstdlib>
+#include <cstdio>
 
 constexpr unsigned long USB_BAUD_RATE = 115200;
 constexpr unsigned long FC_BAUD_RATE = 420000;
@@ -10,11 +11,18 @@ constexpr unsigned long SERIAL_WAIT_MS = 2000;
 constexpr unsigned long STATUS_PRINT_INTERVAL_MS = 1000;
 constexpr unsigned long COMMAND_TIMEOUT_MS = 250;
 constexpr unsigned long FC_ATTITUDE_TIMEOUT_MS = 500;
+constexpr unsigned long FC_TELEMETRY_INTERVAL_MS = 50;
+constexpr unsigned long CONTROLLER_STATUS_INTERVAL_MS = 500;
 // Keep manual USB testing human-friendly without changing the outer-loop timeout.
 constexpr unsigned long MANUAL_COMMAND_TIMEOUT_MS = 5000;
 // When manual arming starts, briefly keep throttle low so Betaflight can arm.
 constexpr unsigned long MANUAL_ARM_THROTTLE_HOLD_MS = 1200;
 constexpr uint16_t MANUAL_ARM_LOW_THROTTLE_RC = 1000;
+// Apply the same low-throttle arming assist to frontend/ESP-NOW commands.
+constexpr unsigned long AUTO_ARM_THROTTLE_HOLD_MS = 1200;
+constexpr uint16_t AUTO_ARM_LOW_THROTTLE_RC = 1000;
+constexpr float AUTO_THROTTLE_RISE_SLEW_RC_PER_SECOND = 450.0f;
+constexpr float AUTO_THROTTLE_FALL_SLEW_RC_PER_SECOND = 700.0f;
 constexpr size_t MAX_PAYLOAD_LENGTH = 251;
 constexpr size_t MAX_SERIAL_FRAME_LENGTH = MAX_PAYLOAD_LENGTH - 1;
 constexpr size_t CRSF_MAX_FRAME_LENGTH = 64;
@@ -30,12 +38,12 @@ constexpr float MAX_WORLD_XY_VELOCITY_MPS = 0.8f;
 constexpr float MAX_WORLD_Z_VELOCITY_MPS = 0.5f;
 // Match these to the flight-controller's configured angle/rate limits.
 constexpr float FC_FULL_SCALE_TILT_DEG = 45.0f;
-constexpr float FC_FULL_SCALE_YAW_RATE_DEG = 360.0f;
+constexpr float FC_FULL_SCALE_YAW_RATE_DEG = 180.0f;
 
 // Set these to -1.0f if your flight-controller channel directions are inverted.
 constexpr float RC_ROLL_SIGN = 1.0f;
-constexpr float RC_PITCH_SIGN = 1.0f;
-constexpr float RC_YAW_SIGN = 1.0f;
+constexpr float RC_PITCH_SIGN = -1.0f;
+constexpr float RC_YAW_SIGN = -1.0f;
 
 struct PidGains {
   float kp;
@@ -56,6 +64,8 @@ struct FlightCommand {
   float velocity[3];
   float rotation[3];
   float target[4];
+  uint32_t sequence;
+  uint32_t counterResetSequence;
   PidGains xyPos;
   PidGains zPos;
   PidGains yawPos;
@@ -85,6 +95,11 @@ struct ManualControlCommand {
 portMUX_TYPE payloadMux = portMUX_INITIALIZER_UNLOCKED;
 char pendingPayload[MAX_PAYLOAD_LENGTH] = {};
 volatile bool pendingPayloadReady = false;
+volatile unsigned long pendingPayloadReceivedMicros = 0;
+uint8_t lastSenderMacAddress[6] = {};
+volatile bool lastSenderMacAddressKnown = false;
+uint8_t registeredSenderMacAddress[6] = {};
+bool senderPeerRegistered = false;
 
 FlightCommand flightCommand = {};
 ManualControlCommand manualControl = {};
@@ -104,9 +119,23 @@ PidState zVelPid = {};
 unsigned long lastCommandRxMs = 0;
 unsigned long lastManualCommandRxMs = 0;
 unsigned long lastStatusPrintMs = 0;
+unsigned long lastControllerStatusMs = 0;
 unsigned long manualArmThrottleHoldStartedMs = 0;
 bool manualArmCommandLatched = false;
 bool manualArmThrottleHoldActive = false;
+unsigned long autoArmThrottleHoldStartedMs = 0;
+bool autoArmCommandLatched = false;
+bool autoArmThrottleHoldActive = false;
+bool hasLastRxSequence = false;
+uint32_t rxPackets = 0;
+uint32_t rxMissingPackets = 0;
+uint32_t rxDuplicatePackets = 0;
+uint32_t rxOutOfOrderPackets = 0;
+uint32_t lastRxSequence = 0;
+uint32_t lastApplyLatencyUs = 0;
+uint32_t lastHandledCounterResetSequence = 0;
+float lastLoopHz = 0.0f;
+float lastControlHz = 0.0f;
 
 uint16_t lastRcRoll = 1500;
 uint16_t lastRcPitch = 1500;
@@ -123,7 +152,10 @@ float lastDesiredPitchDeg = 0.0f;
 float lastFcPitchDeg = 0.0f;
 float lastFcRollDeg = 0.0f;
 float lastFcYawDeg = 0.0f;
+float lastFcPitchRateDegS = 0.0f;
+float lastFcRollRateDegS = 0.0f;
 unsigned long lastFcAttitudeRxMs = 0;
+unsigned long lastFcTelemetryMs = 0;
 
 uint8_t incomingCrsfFrame[CRSF_MAX_FRAME_LENGTH] = {};
 size_t incomingCrsfFrameLength = 0;
@@ -133,6 +165,12 @@ void resetManualArmAssist() {
   manualArmCommandLatched = false;
   manualArmThrottleHoldActive = false;
   manualArmThrottleHoldStartedMs = 0;
+}
+
+void resetAutoArmAssist() {
+  autoArmCommandLatched = false;
+  autoArmThrottleHoldActive = false;
+  autoArmThrottleHoldStartedMs = 0;
 }
 
 float clampf(float value, float minValue, float maxValue) {
@@ -267,6 +305,21 @@ uint16_t throttleToRc(float normalizedThrottle) {
   return static_cast<uint16_t>(1000.0f + (throttle * 1000.0f));
 }
 
+uint16_t slewRcValue(
+  uint16_t currentValue,
+  uint16_t targetValue,
+  float risePerSecond,
+  float fallPerSecond,
+  float dtSeconds
+) {
+  const float current = static_cast<float>(currentValue);
+  const float target = static_cast<float>(targetValue);
+  const float rate = target > current ? risePerSecond : fallPerSecond;
+  const float maxDelta = max(1.0f, rate * max(dtSeconds, 0.001f));
+  const float delta = clampf(target - current, -maxDelta, maxDelta);
+  return static_cast<uint16_t>(clampf(roundf(current + delta), 1000.0f, 2000.0f));
+}
+
 float rcAxisToNormalized(uint16_t rcValue) {
   return clampf((static_cast<float>(rcValue) - 1500.0f) / 500.0f, -1.0f, 1.0f);
 }
@@ -295,6 +348,23 @@ bool parseBoolFlag(const char *json, const char *key, bool &value) {
     return true;
   }
   return false;
+}
+
+bool parseUnsignedValue(const char *json, const char *key, uint32_t &value) {
+  const char *cursor = strstr(json, key);
+  if (cursor == nullptr) {
+    return false;
+  }
+  cursor += strlen(key);
+
+  char *parseEnd = nullptr;
+  const unsigned long parsedValue = strtoul(cursor, &parseEnd, 10);
+  if (parseEnd == cursor) {
+    return false;
+  }
+
+  value = static_cast<uint32_t>(parsedValue);
+  return true;
 }
 
 bool parseFloatArray(const char *json, const char *key, float *values, size_t count) {
@@ -402,6 +472,9 @@ bool parseFlightCommandPayload(const char *payload, FlightCommand &nextCommand) 
   float targetValues[4] = {};
   float limits[5] = {};
 
+  parsed.sequence = 0;
+  parsed.counterResetSequence = 0;
+
   if (!parseBoolFlagEither(payload, "\"a\":", "\"arm\":", parsed.armed)) {
     return false;
   }
@@ -437,6 +510,8 @@ bool parseFlightCommandPayload(const char *payload, FlightCommand &nextCommand) 
   parsed.maxThrottle = clampf(limits[2], parsed.hoverThrottle, 1.0f);
   parsed.maxTiltDeg = clampf(limits[3], 1.0f, 45.0f);
   parsed.maxYawRateDeg = clampf(limits[4], 1.0f, 360.0f);
+  parseUnsignedValue(payload, "\"s\":", parsed.sequence);
+  parseUnsignedValue(payload, "\"q\":", parsed.counterResetSequence);
 
   nextCommand = parsed;
   return true;
@@ -501,31 +576,92 @@ bool parseManualControlPayload(const char *payload, ManualControlCommand &nextCo
 }
 
 void onDataReceived(const esp_now_recv_info_t *recvInfo, const uint8_t *data, int dataLen) {
-  (void)recvInfo;
-
-  if (dataLen <= 0) {
+  if (data == nullptr || dataLen <= 0) {
     return;
   }
 
   const size_t copyLength = min(static_cast<size_t>(dataLen), sizeof(pendingPayload) - 1);
   portENTER_CRITICAL_ISR(&payloadMux);
+  if (recvInfo != nullptr && recvInfo->src_addr != nullptr) {
+    memcpy(lastSenderMacAddress, recvInfo->src_addr, sizeof(lastSenderMacAddress));
+    lastSenderMacAddressKnown = true;
+  }
   memcpy(pendingPayload, data, copyLength);
   pendingPayload[copyLength] = '\0';
+  pendingPayloadReceivedMicros = micros();
   pendingPayloadReady = true;
   portEXIT_CRITICAL_ISR(&payloadMux);
 }
 
-bool pullPendingPayload(char *buffer, size_t bufferSize) {
+bool pullPendingPayload(char *buffer, size_t bufferSize, unsigned long &receivedAtMicros) {
   bool hasPayload = false;
   portENTER_CRITICAL(&payloadMux);
   if (pendingPayloadReady) {
     strncpy(buffer, pendingPayload, bufferSize - 1);
     buffer[bufferSize - 1] = '\0';
+    receivedAtMicros = pendingPayloadReceivedMicros;
     pendingPayloadReady = false;
     hasPayload = true;
   }
   portEXIT_CRITICAL(&payloadMux);
   return hasPayload;
+}
+
+bool copyLastSenderMacAddress(uint8_t *macAddress) {
+  bool hasMacAddress = false;
+  portENTER_CRITICAL(&payloadMux);
+  if (lastSenderMacAddressKnown) {
+    memcpy(macAddress, lastSenderMacAddress, sizeof(lastSenderMacAddress));
+    hasMacAddress = true;
+  }
+  portEXIT_CRITICAL(&payloadMux);
+  return hasMacAddress;
+}
+
+bool ensureSenderPeer(uint8_t *macAddress) {
+  if (!copyLastSenderMacAddress(macAddress)) {
+    return false;
+  }
+
+  if (
+    senderPeerRegistered
+    && memcmp(macAddress, registeredSenderMacAddress, sizeof(registeredSenderMacAddress)) == 0
+  ) {
+    return true;
+  }
+
+  esp_now_peer_info_t peerInfo = {};
+  memcpy(peerInfo.peer_addr, macAddress, 6);
+  peerInfo.channel = 0;
+  peerInfo.encrypt = false;
+
+  if (!esp_now_is_peer_exist(macAddress)) {
+    const esp_err_t addResult = esp_now_add_peer(&peerInfo);
+    if (addResult != ESP_OK && addResult != ESP_ERR_ESPNOW_EXIST) {
+      return false;
+    }
+  }
+
+  memcpy(registeredSenderMacAddress, macAddress, sizeof(registeredSenderMacAddress));
+  senderPeerRegistered = true;
+  return true;
+}
+
+void emitBackendTelemetryLine(const char *line) {
+  if (line == nullptr || line[0] == '\0') {
+    return;
+  }
+
+  uint8_t senderMacAddress[6] = {};
+  if (!ensureSenderPeer(senderMacAddress)) {
+    return;
+  }
+
+  esp_now_send(
+    senderMacAddress,
+    reinterpret_cast<const uint8_t *>(line),
+    strlen(line)
+  );
 }
 
 bool initEspNowReceiver() {
@@ -582,16 +718,34 @@ void handleFlightControllerCrsfFrame(const uint8_t *frame, size_t frameLength) {
     return;
   }
 
-  lastFcPitchDeg = wrapDegrees(
+  const float nextPitchDeg = wrapDegrees(
     static_cast<float>(readInt16BigEndian(payload)) * CRSF_ATTITUDE_LSB_RAD * RAD_TO_DEG_F
   );
-  lastFcRollDeg = wrapDegrees(
+  const float nextRollDeg = wrapDegrees(
     static_cast<float>(readInt16BigEndian(payload + 2)) * CRSF_ATTITUDE_LSB_RAD * RAD_TO_DEG_F
   );
-  lastFcYawDeg = wrapDegrees(
+  const float nextYawDeg = wrapDegrees(
     static_cast<float>(readInt16BigEndian(payload + 4)) * CRSF_ATTITUDE_LSB_RAD * RAD_TO_DEG_F
   );
-  lastFcAttitudeRxMs = millis();
+  const unsigned long nowMs = millis();
+  if (lastFcAttitudeRxMs > 0) {
+    const float dtSeconds = static_cast<float>(nowMs - lastFcAttitudeRxMs) / 1000.0f;
+    if (dtSeconds > 0.0f && dtSeconds <= 0.5f) {
+      lastFcPitchRateDegS = wrapDegrees(nextPitchDeg - lastFcPitchDeg) / dtSeconds;
+      lastFcRollRateDegS = wrapDegrees(nextRollDeg - lastFcRollDeg) / dtSeconds;
+    } else {
+      lastFcPitchRateDegS = 0.0f;
+      lastFcRollRateDegS = 0.0f;
+    }
+  } else {
+    lastFcPitchRateDegS = 0.0f;
+    lastFcRollRateDegS = 0.0f;
+  }
+
+  lastFcPitchDeg = nextPitchDeg;
+  lastFcRollDeg = nextRollDeg;
+  lastFcYawDeg = nextYawDeg;
+  lastFcAttitudeRxMs = nowMs;
 }
 
 void processFlightControllerTelemetry() {
@@ -632,6 +786,79 @@ void processFlightControllerTelemetry() {
       incomingCrsfFrameExpectedLength = 0;
     }
   }
+}
+
+void sendFlightControllerTelemetry() {
+  const unsigned long nowMs = millis();
+  if ((nowMs - lastFcTelemetryMs) < FC_TELEMETRY_INTERVAL_MS) {
+    return;
+  }
+  lastFcTelemetryMs = nowMs;
+
+  const bool fcAttitudeFresh = (
+    lastFcAttitudeRxMs > 0
+    && (nowMs - lastFcAttitudeRxMs) <= FC_ATTITUDE_TIMEOUT_MS
+  );
+  char telemetryLine[128] = {};
+  snprintf(
+    telemetryLine,
+    sizeof(telemetryLine),
+    "!{\"t\":\"imu\",\"ok\":%u,\"p\":%.2f,\"r\":%.2f,\"pr\":%.2f,\"rr\":%.2f}",
+    fcAttitudeFresh ? 1 : 0,
+    fcAttitudeFresh ? lastFcPitchDeg : 0.0f,
+    fcAttitudeFresh ? lastFcRollDeg : 0.0f,
+    fcAttitudeFresh ? lastFcPitchRateDegS : 0.0f,
+    fcAttitudeFresh ? lastFcRollRateDegS : 0.0f
+  );
+  emitBackendTelemetryLine(telemetryLine);
+}
+
+float rcToUnitInterval(uint16_t rcValue) {
+  return clampf((static_cast<float>(rcValue) - 1000.0f) / 1000.0f, 0.0f, 1.0f);
+}
+
+void sendControllerStatus() {
+  if ((millis() - lastControllerStatusMs) < CONTROLLER_STATUS_INTERVAL_MS) {
+    return;
+  }
+  lastControllerStatusMs = millis();
+
+  const unsigned long commandAgeMs = lastCommandRxMs > 0
+    ? (millis() - lastCommandRxMs)
+    : 0;
+  const float rcOutputs[4] = {
+    rcToUnitInterval(lastRcRoll),
+    rcToUnitInterval(lastRcPitch),
+    rcToUnitInterval(lastRcThrottle),
+    rcToUnitInterval(lastRcYaw),
+  };
+
+  char telemetryLine[224] = {};
+  const int telemetryLength = snprintf(
+    telemetryLine,
+    sizeof(telemetryLine),
+    "!{\"t\":\"ctrl\",\"rp\":%lu,\"mg\":%lu,\"dp\":%lu,\"oo\":%lu,\"sq\":%lu,\"lh\":%.2f,\"ch\":%.2f,\"ca\":%lu,\"au\":%lu,\"mi\":%.4f,\"m\":[%.3f,%.3f,%.3f,%.3f],\"rq\":%lu}",
+    static_cast<unsigned long>(rxPackets),
+    static_cast<unsigned long>(rxMissingPackets),
+    static_cast<unsigned long>(rxDuplicatePackets),
+    static_cast<unsigned long>(rxOutOfOrderPackets),
+    static_cast<unsigned long>(lastRxSequence),
+    lastLoopHz,
+    lastControlHz,
+    commandAgeMs,
+    static_cast<unsigned long>(lastApplyLatencyUs),
+    0.0f,
+    rcOutputs[0],
+    rcOutputs[1],
+    rcOutputs[2],
+    rcOutputs[3],
+    static_cast<unsigned long>(lastHandledCounterResetSequence)
+  );
+  if (telemetryLength <= 0 || telemetryLength >= static_cast<int>(sizeof(telemetryLine))) {
+    return;
+  }
+
+  emitBackendTelemetryLine(telemetryLine);
 }
 
 void sendCRSF(uint16_t chRoll, uint16_t chPitch, uint16_t chThrottle, uint16_t chYaw, uint16_t chArm) {
@@ -690,7 +917,51 @@ void sendSafeDisarmedFrame() {
   sendCRSF(lastRcRoll, lastRcPitch, lastRcThrottle, lastRcYaw, lastRcArm);
 }
 
-bool applyFlightCommandPayload(const char *payload, const char *sourceLabel) {
+void resetControllerPacketMetrics(uint32_t handledSequence) {
+  rxPackets = 0;
+  rxMissingPackets = 0;
+  rxDuplicatePackets = 0;
+  rxOutOfOrderPackets = 0;
+  lastRxSequence = 0;
+  hasLastRxSequence = false;
+  lastApplyLatencyUs = 0;
+  lastHandledCounterResetSequence = handledSequence;
+  lastControllerStatusMs = millis();
+}
+
+void recordFlightCommandMetrics(const FlightCommand &command, unsigned long receivedAtMicros) {
+  if (
+    command.counterResetSequence > 0
+    && command.counterResetSequence > lastHandledCounterResetSequence
+  ) {
+    resetControllerPacketMetrics(command.counterResetSequence);
+  }
+
+  lastApplyLatencyUs = receivedAtMicros > 0
+    ? static_cast<uint32_t>(micros() - receivedAtMicros)
+    : 0;
+  rxPackets += 1;
+
+  if (command.sequence <= 0) {
+    return;
+  }
+
+  if (!hasLastRxSequence) {
+    hasLastRxSequence = true;
+    lastRxSequence = command.sequence;
+  } else if (command.sequence == lastRxSequence) {
+    rxDuplicatePackets += 1;
+  } else if (command.sequence > lastRxSequence) {
+    if (command.sequence > (lastRxSequence + 1)) {
+      rxMissingPackets += (command.sequence - lastRxSequence - 1);
+    }
+    lastRxSequence = command.sequence;
+  } else {
+    rxOutOfOrderPackets += 1;
+  }
+}
+
+bool applyFlightCommandPayload(const char *payload, const char *sourceLabel, unsigned long receivedAtMicros = 0) {
   FlightCommand nextCommand = flightCommand;
   if (!parseFlightCommandPayload(payload, nextCommand)) {
     Serial.print("Failed to parse ");
@@ -702,6 +973,7 @@ bool applyFlightCommandPayload(const char *payload, const char *sourceLabel) {
 
   flightCommand = nextCommand;
   lastCommandRxMs = millis();
+  recordFlightCommandMetrics(nextCommand, receivedAtMicros);
   return true;
 }
 
@@ -757,11 +1029,12 @@ void processIncomingSerial() {
 
 void processIncomingEspNowPayloads() {
   char payloadBuffer[MAX_PAYLOAD_LENGTH] = {};
-  if (!pullPendingPayload(payloadBuffer, sizeof(payloadBuffer))) {
+  unsigned long receivedAtMicros = 0;
+  if (!pullPendingPayload(payloadBuffer, sizeof(payloadBuffer), receivedAtMicros)) {
     return;
   }
 
-  applyFlightCommandPayload(payloadBuffer, "ESP-NOW");
+  applyFlightCommandPayload(payloadBuffer, "ESP-NOW", receivedAtMicros);
 }
 
 bool runManualControlToFlightController() {
@@ -770,6 +1043,7 @@ bool runManualControlToFlightController() {
     return false;
   }
 
+  resetAutoArmAssist();
   resetAllPidStates();
 
   const bool manualFresh = (millis() - lastManualCommandRxMs) <= MANUAL_COMMAND_TIMEOUT_MS;
@@ -829,10 +1103,40 @@ void runOuterLoopToFlightController(float dtSeconds) {
 
   const bool commandFresh = (millis() - lastCommandRxMs) <= COMMAND_TIMEOUT_MS;
   const bool controlReady = commandFresh && flightCommand.armed && flightCommand.spatialValid;
+  lastControlHz = controlReady && dtSeconds > 0.0f ? (1.0f / dtSeconds) : 0.0f;
 
   if (!controlReady) {
+    resetAutoArmAssist();
     resetAllPidStates();
     sendSafeDisarmedFrame();
+    return;
+  }
+
+  if (!autoArmCommandLatched) {
+    autoArmCommandLatched = true;
+    autoArmThrottleHoldActive = true;
+    autoArmThrottleHoldStartedMs = millis();
+  }
+  if (
+    autoArmThrottleHoldActive
+    && (millis() - autoArmThrottleHoldStartedMs) >= AUTO_ARM_THROTTLE_HOLD_MS
+  ) {
+    autoArmThrottleHoldActive = false;
+  }
+  if (autoArmThrottleHoldActive) {
+    resetAllPidStates();
+    lastRcRoll = 1500;
+    lastRcPitch = 1500;
+    lastRcThrottle = AUTO_ARM_LOW_THROTTLE_RC;
+    lastRcYaw = 1500;
+    lastRcArm = 2000;
+    lastDesiredWorldXVelocity = 0.0f;
+    lastDesiredWorldYVelocity = 0.0f;
+    lastDesiredWorldZVelocity = 0.0f;
+    lastDesiredYawRate = 0.0f;
+    lastDesiredRollDeg = 0.0f;
+    lastDesiredPitchDeg = 0.0f;
+    sendCRSF(lastRcRoll, lastRcPitch, lastRcThrottle, lastRcYaw, lastRcArm);
     return;
   }
 
@@ -917,7 +1221,13 @@ void runOuterLoopToFlightController(float dtSeconds) {
 
   lastRcRoll = normalizedAxisToRc(rollNormalized, RC_ROLL_SIGN);
   lastRcPitch = normalizedAxisToRc(pitchNormalized, RC_PITCH_SIGN);
-  lastRcThrottle = throttleToRc(requestedThrottle);
+  lastRcThrottle = slewRcValue(
+    lastRcThrottle,
+    throttleToRc(requestedThrottle),
+    AUTO_THROTTLE_RISE_SLEW_RC_PER_SECOND,
+    AUTO_THROTTLE_FALL_SLEW_RC_PER_SECOND,
+    dtSeconds
+  );
   lastRcYaw = normalizedAxisToRc(yawNormalized, RC_YAW_SIGN);
   lastRcArm = 2000;
 
@@ -932,7 +1242,6 @@ void printStatus() {
 
   const bool autoFresh = (millis() - lastCommandRxMs) <= COMMAND_TIMEOUT_MS;
   const bool manualFresh = manualControl.enabled && ((millis() - lastManualCommandRxMs) <= MANUAL_COMMAND_TIMEOUT_MS);
-  const bool fcAttitudeFresh = (millis() - lastFcAttitudeRxMs) <= FC_ATTITUDE_TIMEOUT_MS;
   const char *mode = "safe";
   if (manualControl.enabled) {
     if (!manualFresh) {
@@ -944,6 +1253,8 @@ void printStatus() {
     } else {
       mode = "manual";
     }
+  } else if (autoFresh && flightCommand.armed && flightCommand.spatialValid && autoArmThrottleHoldActive) {
+    mode = "outer_arm_hold";
   } else if (autoFresh && flightCommand.armed && flightCommand.spatialValid) {
     mode = "outer";
   } else if (autoFresh && !flightCommand.armed) {
@@ -953,7 +1264,7 @@ void printStatus() {
   }
 
   Serial.printf(
-    "mode=%s autoFresh=%d autoArm=%d ok=%d manEn=%d manFresh=%d manArm=%d manRaw=%d fcAttOk=%d fcAtt=(p=%.1f,r=%.1f,y=%.1f) pos=(%.2f,%.2f,%.2f) vel=(%.2f,%.2f,%.2f) yaw=%.1f target=(%.2f,%.2f,%.2f|%.1f) outerVel=(%.2f,%.2f,%.2f) tilt=(%.1f,%.1f) yawRate=%.1f rc=(%u,%u,%u,%u,%u)\n",
+    "mode=%s autoFresh=%d autoArm=%d ok=%d manEn=%d manFresh=%d manArm=%d manRaw=%d pos=(%.2f,%.2f,%.2f) vel=(%.2f,%.2f,%.2f) yaw=%.1f target=(%.2f,%.2f,%.2f|%.1f) outerVel=(%.2f,%.2f,%.2f) tilt=(%.1f,%.1f) yawRate=%.1f rc=(%u,%u,%u,%u,%u)\n",
     mode,
     autoFresh ? 1 : 0,
     flightCommand.armed ? 1 : 0,
@@ -962,10 +1273,6 @@ void printStatus() {
     manualFresh ? 1 : 0,
     manualControl.armed ? 1 : 0,
     manualControl.useRawRc ? 1 : 0,
-    fcAttitudeFresh ? 1 : 0,
-    lastFcPitchDeg,
-    lastFcRollDeg,
-    lastFcYawDeg,
     flightCommand.position[0],
     flightCommand.position[1],
     flightCommand.position[2],
@@ -1031,11 +1338,15 @@ void loop() {
   float dtSeconds = static_cast<float>(nowMicros - lastLoopMicros) / 1000000.0f;
   lastLoopMicros = nowMicros;
   dtSeconds = clampf(dtSeconds, 0.001f, 0.02f);
+  lastLoopHz = dtSeconds > 0.0f ? (1.0f / dtSeconds) : 0.0f;
+  lastControlHz = 0.0f;
 
   processIncomingSerial();
   processIncomingEspNowPayloads();
   processFlightControllerTelemetry();
+  sendFlightControllerTelemetry();
   runOuterLoopToFlightController(dtSeconds);
+  sendControllerStatus();
   printStatus();
 
   delay(2);

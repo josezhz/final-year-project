@@ -9,7 +9,7 @@ constexpr size_t MAX_SERIAL_FRAME_LENGTH = MAX_JSON_PAYLOAD_LENGTH + 1;
 constexpr unsigned long SERIAL_WAIT_MS = 2000;
 constexpr unsigned long BRIDGE_STATUS_INTERVAL_MS = 1000;
 
-uint8_t DRONE_MAC_ADDRESS[] = {0x60, 0x55, 0xF9, 0xDA, 0x4E, 0xD4};
+uint8_t DRONE_MAC_ADDRESS[] = {0xA0, 0xF2, 0x62, 0xF1, 0x64, 0x28};
 
 struct EspNowMessage {
   char payload[MAX_JSON_PAYLOAD_LENGTH + 1];

@@ -57,31 +57,60 @@ POSITION_JUMP_WEIGHT = 2.0
 PREVIEW_HZ = 5
 MAX_ESP_NOW_PAYLOAD_BYTES = 250
 IMU_LEVEL_CALIBRATION_RETRY_SECONDS = 1.0
-MOTION_STATE_PROCESS_NOISE = 1e-2
-MOTION_STATE_MEASUREMENT_NOISE = 1.0
+MOTION_STATE_PROCESS_NOISE = 5e-2
+MOTION_STATE_POSITION_MEASUREMENT_NOISE = 0.03
+MOTION_STATE_VELOCITY_MEASUREMENT_NOISE = 0.18
 MOTION_STATE_ZERO_THRESHOLD = 0.01
 MOTION_STATE_MAX_DT = 0.25
 MOTION_STATE_MAX_ABS_VELOCITY = 2.5
 
 CONTROL_PID_DEFAULTS = {
-    "xyPos": {"kp": 0.0, "ki": 0.0, "kd": 0.0},
+    "xyPos": {"kp": 1.25, "ki": 0.0, "kd": 0.0},
     "zPos": {"kp": 1.5, "ki": 0.0, "kd": 0.0},
-    "yawPos": {"kp": 0.06, "ki": 0.0, "kd": 0.0},
-    "xyVel": {"kp": 0.0, "ki": 0.0, "kd": 0.0},
-    "zVel": {"kp": 0.18, "ki": 0.0, "kd": 0.02},
+    "yawPos": {"kp": 1.2, "ki": 0.0, "kd": 0.0},
+    "xyVel": {"kp": 1.15, "ki": 0.0, "kd": 0.0},
+    "zVel": {"kp": 1.35, "ki": 0.06, "kd": 0.0},
     "roll": {"kp": 0.008, "ki": 0.0, "kd": 0.0006},
     "pitch": {"kp": 0.008, "ki": 0.0, "kd": 0.0006},
     "yawRate": {"kp": 0.006, "ki": 0.0, "kd": 0.0},
 }
+CONTROL_LOG_PID_AXES = tuple(CONTROL_PID_DEFAULTS.keys())
+CONTROL_LOG_PID_TERMS = ("kp", "ki", "kd")
+CONTROL_LOG_TARGET_AXES = ("x", "y", "z", "yaw")
+CONTROL_LOG_LIMIT_FIELDS = (
+    "hoverThrottle",
+    "minThrottle",
+    "maxThrottle",
+    "maxTiltDeg",
+    "maxYawRateDeg",
+)
+CONTROL_LOG_COLUMNS = [
+    "control_active",
+    "control_armed",
+    "target_x_m",
+    "target_y_m",
+    "target_z_m",
+    "target_yaw_deg",
+    "limit_hover_throttle",
+    "limit_min_throttle",
+    "limit_max_throttle",
+    "limit_max_tilt_deg",
+    "limit_max_yaw_rate_deg",
+    *[
+        f"pid_{axis}_{term}"
+        for axis in CONTROL_LOG_PID_AXES
+        for term in CONTROL_LOG_PID_TERMS
+    ],
+]
 # Mocap/body frame is +x front, +y left, +z up. A yaw target of 0 deg means
 # the drone's nose should stay aligned with the world +x direction.
-CONTROL_TARGET_DEFAULTS = {"x": 0.0, "y": 0.0, "z": 0.35, "yaw": 0.0}
+CONTROL_TARGET_DEFAULTS = {"x": 0.0, "y": 0.0, "z": 0.3, "yaw": 0.0}
 CONTROL_LIMIT_DEFAULTS = {
-    "hoverThrottle": 0.65,
-    "minThrottle": 0.30,
-    "maxThrottle": 0.95,
-    "maxTiltDeg": 3.0,
-    "maxYawRateDeg": 25.0,
+    "hoverThrottle": 0.83,
+    "minThrottle": 0.42,
+    "maxThrottle": 1.00,
+    "maxTiltDeg": 8.0,
+    "maxYawRateDeg": 180.0,
 }
 
 
@@ -509,6 +538,36 @@ def sanitize_limit_config(payload):
     return sanitized
 
 
+def get_control_field(control_state, field, default):
+    if isinstance(control_state, dict):
+        return control_state.get(field, default)
+    return getattr(control_state, field, default)
+
+
+def build_control_log_values(control_state=None):
+    target = sanitize_target_config(get_control_field(control_state, "target", {}))
+    limits = sanitize_limit_config(get_control_field(control_state, "limits", {}))
+    pid = sanitize_pid_config(get_control_field(control_state, "pid", {}))
+
+    values = [
+        int(bool(get_control_field(control_state, "active", False))),
+        int(bool(get_control_field(control_state, "armed", False))),
+        f"{target['x']:.4f}",
+        f"{target['y']:.4f}",
+        f"{target['z']:.4f}",
+        f"{target['yaw']:.2f}",
+        f"{limits['hoverThrottle']:.4f}",
+        f"{limits['minThrottle']:.4f}",
+        f"{limits['maxThrottle']:.4f}",
+        f"{limits['maxTiltDeg']:.2f}",
+        f"{limits['maxYawRateDeg']:.2f}",
+    ]
+    for axis in CONTROL_LOG_PID_AXES:
+        for term in CONTROL_LOG_PID_TERMS:
+            values.append(f"{pid[axis][term]:.6f}")
+    return values
+
+
 def compact_numeric(value, digits=4):
     rounded = round(float(value), digits)
     if abs(rounded) < (10 ** -digits):
@@ -721,9 +780,16 @@ class MotionStateKalmanFilter:
         self.kalman.processNoiseCov = (
             np.eye(9, dtype=np.float32) * MOTION_STATE_PROCESS_NOISE
         )
-        self.kalman.measurementNoiseCov = (
-            np.eye(6, dtype=np.float32) * MOTION_STATE_MEASUREMENT_NOISE
-        )
+        self.kalman.measurementNoiseCov = np.diag(
+            [
+                MOTION_STATE_POSITION_MEASUREMENT_NOISE,
+                MOTION_STATE_POSITION_MEASUREMENT_NOISE,
+                MOTION_STATE_POSITION_MEASUREMENT_NOISE,
+                MOTION_STATE_VELOCITY_MEASUREMENT_NOISE,
+                MOTION_STATE_VELOCITY_MEASUREMENT_NOISE,
+                MOTION_STATE_VELOCITY_MEASUREMENT_NOISE,
+            ]
+        ).astype(np.float32)
         self.kalman.measurementMatrix = np.array(
             [
                 [1, 0, 0, 0, 0, 0, 0, 0, 0],
@@ -1249,6 +1315,7 @@ class ExperimentMetricsLogger:
                 "yaw_deg",
                 "pitch_deg",
                 "roll_deg",
+                *CONTROL_LOG_COLUMNS,
                 "serial_connected",
                 "serial_send_enabled",
                 "serial_send_ok",
@@ -1297,6 +1364,7 @@ class ExperimentMetricsLogger:
         serial_payload_size_bytes,
         imu_sample=None,
         mocap_sample=None,
+        control_state=None,
     ):
         if not self.is_active():
             return
@@ -1319,6 +1387,7 @@ class ExperimentMetricsLogger:
         detected_leds = telemetry.get("detected_leds_per_camera", [])
         motor_outputs = controller_metrics.get("motor_outputs", [0.0, 0.0, 0.0, 0.0])
         imu_values = build_imu_log_values(imu_sample, mocap_sample)
+        control_values = build_control_log_values(control_state)
         timestamp = datetime.fromtimestamp(sample_time).isoformat(timespec="milliseconds")
         elapsed = max(0.0, float(sample_time) - self.started_at)
 
@@ -1350,6 +1419,7 @@ class ExperimentMetricsLogger:
                 f"{coerce_float(rotation.get('yaw'), 0.0):.2f}",
                 f"{coerce_float(rotation.get('pitch'), 0.0):.2f}",
                 f"{coerce_float(rotation.get('roll'), 0.0):.2f}",
+                *control_values,
                 int(bool(serial_connected)),
                 int(bool(serial_send_enabled)),
                 int(bool(serial_send_ok)),
@@ -2349,6 +2419,8 @@ class ControlServer:
                 ],
                 "s": payload_sequence,
             }
+            if self.packet_counter_reset_sequence > 0:
+                payload["q"] = int(self.packet_counter_reset_sequence)
             if include_version:
                 payload["v"] = 2
             if imu_level_pending:
@@ -2692,6 +2764,7 @@ class ControlServer:
                         serial_payload_size_bytes=self.last_serial_payload_size_bytes,
                         imu_sample=self.telemetry.get("imu", {}),
                         mocap_sample=self.latest_mocap_log_sample,
+                        control_state=self.control,
                     )
             except Exception as exc:
                 self.telemetry = merge_telemetry(
@@ -2736,6 +2809,7 @@ class ControlServer:
                     serial_payload_size_bytes=self.last_serial_payload_size_bytes,
                     imu_sample=self.telemetry.get("imu", {}),
                     mocap_sample=self.latest_mocap_log_sample,
+                    control_state=self.control,
                 )
 
             await self.broadcast_state()

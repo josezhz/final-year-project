@@ -642,10 +642,10 @@ function ImuAttitudeChart({ samples, telemetry }) {
     <DualMetricTimelineChart
       samples={imuSamples}
       telemetryValues={imu}
-      headingLabel="Drone IMU"
+      headingLabel="FC attitude"
       title="Pitch / roll"
-      ariaLabel="Drone IMU pitch and roll over time"
-      statusLabel={imu.ready ? 'Drone IMU live' : 'Awaiting drone IMU'}
+      ariaLabel="Flight controller pitch and roll over time"
+      statusLabel={imu.ready ? 'FC attitude live' : 'Awaiting FC attitude'}
       yLabel="Deg"
       fallbackAbsMax={8}
       series={[
@@ -682,10 +682,10 @@ function ImuRateChart({ samples, telemetry }) {
     <DualMetricTimelineChart
       samples={imuSamples}
       telemetryValues={imu}
-      headingLabel="Drone IMU"
+      headingLabel="FC attitude"
       title="Pitch / roll rate"
-      ariaLabel="Drone IMU pitch rate and roll rate over time"
-      statusLabel={imu.ready ? 'Gyro rates live' : 'Awaiting drone IMU'}
+      ariaLabel="Flight controller pitch rate and roll rate over time"
+      statusLabel={imu.ready ? 'FC rates live' : 'Awaiting FC attitude'}
       yLabel="Deg/s"
       fallbackAbsMax={40}
       series={[
@@ -1413,11 +1413,11 @@ function App() {
       detail: 'Side-to-side tilt',
     },
     {
-      label: 'Drone IMU',
+      label: 'FC attitude',
       value: telemetry.imu?.ready ? 'Live' : 'Waiting',
       detail: telemetry.imu?.ready
         ? `Pitch ${formatNumber(telemetry.imu.pitch, 1)} / Roll ${formatNumber(telemetry.imu.roll, 1)} deg`
-        : 'No onboard IMU data yet',
+        : 'No flight-controller attitude yet',
       tone: telemetry.imu?.ready ? 'ready' : 'blocked',
     },
     {
@@ -1999,8 +1999,8 @@ function App() {
                 <p>
                   Start with the shared XY and Z position gains, then tune the XY and Z velocity
                   damping stage borrowed from Low-Cost-Mocap, and only then tighten the
-                  MPU6050-backed roll, pitch, and yaw-rate loops. In this project that cascade
-                  feeds our direct motor mixer instead of an external SBUS flight controller.
+                  roll, pitch, and yaw-rate loops. In this project that cascade feeds CRSF
+                  channel commands for the Betaflight flight controller.
                 </p>
               </div>
 
