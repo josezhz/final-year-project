@@ -533,10 +533,10 @@ bool parseFloatArrayEither(
 }
 
 bool parsePidProfilePayload(const char *payload, FlightCommand &parsed) {
-  float pidBundle[24] = {};
+  float pidBundle[15] = {};
   float values3[3] = {};
 
-  if (parseFloatArray(payload, "\"u\":", pidBundle, 24)) {
+  if (parseFloatArray(payload, "\"u\":", pidBundle, 15)) {
     parsed.xyPos = makePidGains(pidBundle[0], pidBundle[1], pidBundle[2]);
     parsed.zPos = makePidGains(pidBundle[3], pidBundle[4], pidBundle[5]);
     parsed.yawPos = makePidGains(pidBundle[6], pidBundle[7], pidBundle[8]);

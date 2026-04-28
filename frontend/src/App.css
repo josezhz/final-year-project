@@ -66,14 +66,6 @@
   line-height: 0.95;
 }
 
-.hero-copy {
-  max-width: 60rem;
-  margin: 0;
-  color: var(--muted-strong);
-  font-size: 1rem;
-  line-height: 1.6;
-}
-
 .hero-status-grid {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
@@ -87,8 +79,7 @@
 .gate-card,
 .chart-readout div,
 .snapshot-card,
-.pid-axis-card,
-pre {
+.pid-axis-card {
   backdrop-filter: blur(12px);
 }
 
@@ -238,8 +229,7 @@ label,
 
 select,
 input,
-button,
-pre {
+button {
   font: inherit;
 }
 
@@ -356,13 +346,6 @@ button:disabled:hover {
   font-size: 1.06rem;
 }
 
-.readiness-banner p,
-.next-step-card p {
-  margin: 0;
-  color: var(--muted-strong);
-  line-height: 1.55;
-}
-
 .readiness-banner.ready {
   background: linear-gradient(135deg, rgba(110, 208, 169, 0.2), rgba(255, 255, 255, 0.04));
 }
@@ -393,10 +376,7 @@ button:disabled:hover {
 }
 
 .hint,
-.axis-copy,
-.axis-note,
-.loop-head p,
-.pid-focus-banner p {
+.loop-head p {
   margin: 0;
   color: var(--muted);
   line-height: 1.55;
@@ -531,14 +511,14 @@ button:disabled:hover {
 
 .disclosure-summary::after,
 .panel-summary::after {
-  content: "▾";
+  content: "v";
   color: var(--muted);
   font-size: 1rem;
 }
 
 .disclosure-section:not([open]) .disclosure-summary::after,
 .disclosure-panel:not([open]) .panel-summary::after {
-  content: "▸";
+  content: ">";
 }
 
 .disclosure-summary div,
@@ -816,8 +796,7 @@ button:disabled:hover {
 }
 
 .snapshot-values div,
-.pid-readout,
-.pid-focus-banner div {
+.pid-readout {
   display: grid;
   gap: 0.25rem;
 }
@@ -825,15 +804,6 @@ button:disabled:hover {
 .snapshot-values span,
 .pid-readout span {
   color: var(--muted);
-}
-
-.pid-focus-banner {
-  display: grid;
-  gap: 0.55rem;
-  padding: 0.98rem 1rem;
-  border-radius: 18px;
-  border: 1px solid var(--border);
-  background: linear-gradient(90deg, rgba(242, 186, 100, 0.14), rgba(123, 223, 242, 0.1));
 }
 
 .loop-section {
@@ -870,10 +840,6 @@ button:disabled:hover {
 
 .pid-axis-card.outer {
   background: linear-gradient(180deg, rgba(242, 186, 100, 0.12), rgba(255, 255, 255, 0.035));
-}
-
-.pid-axis-card.inner {
-  background: linear-gradient(180deg, rgba(123, 223, 242, 0.12), rgba(255, 255, 255, 0.035));
 }
 
 .pid-axis-head {
@@ -924,18 +890,6 @@ button:disabled:hover {
   text-transform: uppercase;
 }
 
-pre {
-  margin: 0;
-  min-height: 8rem;
-  max-height: 16rem;
-  padding: 0.9rem;
-  border-radius: 18px;
-  border: 1px solid var(--border);
-  background: rgba(7, 12, 23, 0.58);
-  color: #d7f5ef;
-  overflow: auto;
-}
-
 @media (min-width: 900px) {
   .hero {
     grid-template-columns: minmax(0, 1.15fr) minmax(0, 1fr);
@@ -966,8 +920,7 @@ pre {
     grid-column: span 7;
   }
 
-  .panel-pid,
-  .panel-payload {
+  .panel-pid {
     grid-column: span 12;
   }
 }

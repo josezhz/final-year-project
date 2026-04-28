@@ -76,9 +76,6 @@ CONTROL_PID_DEFAULTS = {
     "yawPos": {"kp": 1.2, "ki": 0.0, "kd": 0.0},
     "xyVel": {"kp": 0.9, "ki": 0.0, "kd": 0.0},
     "zVel": {"kp": 0.85, "ki": 0.04, "kd": 0.0},
-    "roll": {"kp": 0.008, "ki": 0.0, "kd": 0.0006},
-    "pitch": {"kp": 0.008, "ki": 0.0, "kd": 0.0006},
-    "yawRate": {"kp": 0.006, "ki": 0.0, "kd": 0.0},
 }
 CONTROL_LOG_PID_AXES = tuple(CONTROL_PID_DEFAULTS.keys())
 CONTROL_LOG_PID_TERMS = ("kp", "ki", "kd")
@@ -118,18 +115,6 @@ CONTROL_LIMIT_DEFAULTS = {
     "maxTiltDeg": 8.0,
     "maxYawRateDeg": 180.0,
 }
-BATTERY_HOVER_COMPENSATION_DEFAULTS = {
-    "enabled": False,
-    "nominalVoltage": 3.8,
-    "gain": 0.14,
-    "maxCorrection": 0.08,
-    "minHoverThrottle": 0.68,
-    "maxHoverThrottle": 0.90,
-    "filterTimeConstant": 2.0,
-    "rateLimitPerSecond": 0.02,
-}
-
-
 # Body model uses the same mocap frame: +x front, +y left, +z up.
 DRONE_LED_MODEL = np.array(
     [
@@ -162,14 +147,6 @@ DEFAULT_TELEMETRY = {
     "rotation": {"yaw": 0.0, "pitch": 0.0, "roll": 0.0},
     "imu": DEFAULT_IMU_TELEMETRY,
     "battery": DEFAULT_BATTERY_TELEMETRY,
-    "battery_hover_compensation": {
-        "enabled": False,
-        "status": "disabled",
-        "baseHoverThrottle": CONTROL_LIMIT_DEFAULTS["hoverThrottle"],
-        "adjustedHoverThrottle": CONTROL_LIMIT_DEFAULTS["hoverThrottle"],
-        "correction": 0.0,
-        "filteredVoltage": 0.0,
-    },
     "error": 0.0,
     "mapping_error_px": 0.0,
     "model_fit_error_m": 0.0,
@@ -242,10 +219,6 @@ BATTERY_LOG_COLUMNS = [
     "battery_current_a",
     "battery_capacity_mah",
     "battery_remaining_percent",
-    "battery_hover_comp_enabled",
-    "battery_hover_filtered_voltage_v",
-    "battery_hover_adjusted_throttle",
-    "battery_hover_correction",
 ]
 PREVIEW_WIDTH = 240
 PREVIEW_JPEG_QUALITY = 45
@@ -291,13 +264,6 @@ def default_target_config():
 
 def default_limit_config():
     return {axis: float(value) for axis, value in CONTROL_LIMIT_DEFAULTS.items()}
-
-
-def default_battery_hover_compensation_config():
-    return {
-        field: bool(value) if field == "enabled" else float(value)
-        for field, value in BATTERY_HOVER_COMPENSATION_DEFAULTS.items()
-    }
 
 
 def coerce_float(value, default=0.0):
@@ -462,11 +428,8 @@ def build_imu_log_values(sample=None, mocap_sample=None):
     ]
 
 
-def build_battery_log_values(sample=None, compensation_status=None):
+def build_battery_log_values(sample=None):
     sample = sanitize_battery_telemetry(sample)
-    compensation_status = (
-        compensation_status if isinstance(compensation_status, dict) else {}
-    )
     return [
         int(bool(sample.get("ready", False))),
         f"{coerce_float(sample.get('voltage'), 0.0):.3f}",
@@ -474,10 +437,6 @@ def build_battery_log_values(sample=None, compensation_status=None):
         f"{coerce_float(sample.get('current'), 0.0):.3f}",
         coerce_int(sample.get("capacity_mah"), 0),
         coerce_int(sample.get("remaining_percent"), -1),
-        int(bool(compensation_status.get("enabled", False))),
-        f"{coerce_float(compensation_status.get('filteredVoltage'), 0.0):.3f}",
-        f"{coerce_float(compensation_status.get('adjustedHoverThrottle'), 0.0):.4f}",
-        f"{coerce_float(compensation_status.get('correction'), 0.0):.4f}",
     ]
 
 
@@ -658,53 +617,6 @@ def sanitize_limit_config(payload):
     return sanitized
 
 
-def sanitize_battery_hover_compensation_config(payload):
-    payload = payload if isinstance(payload, dict) else {}
-    defaults = BATTERY_HOVER_COMPENSATION_DEFAULTS
-    sanitized = {
-        "enabled": bool(payload.get("enabled", defaults["enabled"])),
-        "nominalVoltage": coerce_float(
-            payload.get("nominalVoltage"),
-            defaults["nominalVoltage"],
-        ),
-        "gain": coerce_float(payload.get("gain"), defaults["gain"]),
-        "maxCorrection": coerce_float(
-            payload.get("maxCorrection"),
-            defaults["maxCorrection"],
-        ),
-        "minHoverThrottle": coerce_float(
-            payload.get("minHoverThrottle"),
-            defaults["minHoverThrottle"],
-        ),
-        "maxHoverThrottle": coerce_float(
-            payload.get("maxHoverThrottle"),
-            defaults["maxHoverThrottle"],
-        ),
-        "filterTimeConstant": coerce_float(
-            payload.get("filterTimeConstant"),
-            defaults["filterTimeConstant"],
-        ),
-        "rateLimitPerSecond": coerce_float(
-            payload.get("rateLimitPerSecond"),
-            defaults["rateLimitPerSecond"],
-        ),
-    }
-    sanitized["nominalVoltage"] = max(3.0, min(sanitized["nominalVoltage"], 4.3))
-    sanitized["gain"] = max(0.0, min(sanitized["gain"], 0.3))
-    sanitized["maxCorrection"] = max(0.0, min(sanitized["maxCorrection"], 0.15))
-    sanitized["minHoverThrottle"] = max(0.0, min(sanitized["minHoverThrottle"], 1.0))
-    sanitized["maxHoverThrottle"] = max(
-        sanitized["minHoverThrottle"],
-        min(sanitized["maxHoverThrottle"], 1.0),
-    )
-    sanitized["filterTimeConstant"] = max(0.25, min(sanitized["filterTimeConstant"], 10.0))
-    sanitized["rateLimitPerSecond"] = max(
-        0.001,
-        min(sanitized["rateLimitPerSecond"], 0.2),
-    )
-    return sanitized
-
-
 def get_control_field(control_state, field, default):
     if isinstance(control_state, dict):
         return control_state.get(field, default)
@@ -744,8 +656,6 @@ def compact_numeric(value, digits=4):
     if math.isclose(rounded, integer_value, abs_tol=10 ** -digits):
         return integer_value
 
-    # Re-parse a fixed-width decimal string so json.dumps emits the shortest
-    # numeric representation instead of preserving trailing float artifacts.
     return float(f"{rounded:.{digits}f}".rstrip("0").rstrip("."))
 
 
@@ -764,9 +674,6 @@ def compact_pid_bundle(pid_config, digits=4):
         "yawPos",
         "xyVel",
         "zVel",
-        "roll",
-        "pitch",
-        "yawRate",
     )
     values = []
     for axis in ordered_axes:
@@ -900,7 +807,7 @@ def wrap_angle_degrees(angle):
 
 
 def unwrap_angle_degrees(previous_angle, next_angle):
-    """Unwrap angle to prevent jumps at ±180 boundary."""
+    """Unwrap angle to prevent jumps at the +/-180 boundary."""
     return previous_angle + wrap_angle_degrees(next_angle - previous_angle)
 
 
@@ -1057,19 +964,15 @@ def detect_leds(frame):
     if len(led_candidates) < MAX_LEDS:
         return [(l["x"], l["y"]) for l in led_candidates]
 
-    # 1. Take top 3 by area/intensity if more than 3 found (optional filter)
     top_three = sorted(
         led_candidates,
         key=lambda candidate: candidate["area"],
         reverse=True,
     )[:MAX_LEDS]
 
-    # 2. Calculate Centroid of the 3 points
     cx = sum(l["x"] for l in top_three) / MAX_LEDS
     cy = sum(l["y"] for l in top_three) / MAX_LEDS
 
-    # 3. Sort by angle around centroid (atan2(y-cy, x-cx))
-    # This creates a consistent clockwise or counter-clockwise sequence
     top_three.sort(key=lambda l: math.atan2(l["y"] - cy, l["x"] - cx))
 
     return [(l["x"], l["y"]) for l in top_three]
@@ -1319,7 +1222,6 @@ def solve_pose(
     semantic_permutation = semantic_pose["semantic_permutation"]
     semantic_points = semantic_pose["semantic_points"]
 
-    # Check if fit is acceptable
     if fit_error >= MAX_FIT_ERROR:
         return None
 
@@ -1481,77 +1383,6 @@ class ControlState:
     target: dict = field(default_factory=default_target_config)
     limits: dict = field(default_factory=default_limit_config)
     pid: dict = field(default_factory=default_pid_config)
-    battery_hover_compensation: dict = field(
-        default_factory=default_battery_hover_compensation_config
-    )
-
-
-class ImuDataLogger:
-    def __init__(self, log_dir: Path):
-        self.log_dir = Path(log_dir)
-        self.file_handle = None
-        self.csv_writer = None
-        self.log_path = None
-        self.started_at = 0.0
-
-    def is_active(self):
-        return self.file_handle is not None
-
-    def start(self):
-        if self.is_active():
-            return self.log_path
-
-        self.log_dir.mkdir(parents=True, exist_ok=True)
-        self.started_at = time.time()
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        self.log_path = self.log_dir / f"imu_log_{timestamp}.csv"
-        self.file_handle = self.log_path.open("w", newline="", encoding="utf-8")
-        self.csv_writer = csv.writer(self.file_handle)
-        self.csv_writer.writerow(
-            [
-                "iso_time",
-                "elapsed_s",
-                *IMU_LOG_COLUMNS,
-            ]
-        )
-        self.file_handle.flush()
-        print(f"IMU logging started: {self.log_path}")
-        return self.log_path
-
-    def log_sample(self, sample, sample_time=None, mocap_sample=None):
-        if not self.is_active():
-            return
-
-        mocap_sample = mocap_sample if isinstance(mocap_sample, dict) else {}
-        sample_time = float(sample_time or time.time())
-        timestamp = datetime.fromtimestamp(sample_time).isoformat(timespec="milliseconds")
-        elapsed = max(0.0, sample_time - self.started_at)
-        self.csv_writer.writerow(
-            [
-                timestamp,
-                f"{elapsed:.3f}",
-                *build_imu_log_values(sample, mocap_sample),
-            ]
-        )
-        self.file_handle.flush()
-
-    def stop(self):
-        if not self.is_active():
-            return None
-
-        log_path = self.log_path
-        try:
-            self.file_handle.close()
-        finally:
-            self.file_handle = None
-            self.csv_writer = None
-            self.log_path = None
-            self.started_at = 0.0
-        print(f"IMU logging stopped: {log_path}")
-        return log_path
-
-    def close(self):
-        return self.stop()
 
 
 class ExperimentMetricsLogger:
@@ -1678,10 +1509,7 @@ class ExperimentMetricsLogger:
         detected_leds = telemetry.get("detected_leds_per_camera", [])
         motor_outputs = controller_metrics.get("motor_outputs", [0.0, 0.0, 0.0, 0.0])
         imu_values = build_imu_log_values(imu_sample, mocap_sample)
-        battery_values = build_battery_log_values(
-            telemetry.get("battery", {}),
-            telemetry.get("battery_hover_compensation", {}),
-        )
+        battery_values = build_battery_log_values(telemetry.get("battery", {}))
         control_values = build_control_log_values(control_state)
         timestamp = datetime.fromtimestamp(sample_time).isoformat(timespec="milliseconds")
         elapsed = max(0.0, float(sample_time) - self.started_at)
@@ -1786,7 +1614,6 @@ class SerialBridge:
         self.latest_controller_metrics = default_controller_metrics()
         self._last_imu_received_at = 0.0
         self._last_battery_received_at = 0.0
-        self.imu_sample_callback = None
 
     def refresh_ports(self, force=False):
         now = time.time()
@@ -1917,10 +1744,6 @@ class SerialBridge:
                 }
             )
             self._last_imu_received_at = time.time()
-            if callable(self.imu_sample_callback):
-                self.imu_sample_callback(
-                    copy.deepcopy(self.latest_imu), self._last_imu_received_at
-                )
             return
 
         if payload_type in ("bat", "battery"):
@@ -2072,8 +1895,6 @@ class MotionCaptureEngine:
         self.camera_pose_summary = []
         
         self.motion_state_filter = MotionStateKalmanFilter()
-        
-        # Attitude filters
         self.attitude_filters = {
             "yaw": ScalarKalmanFilter(1.0, 2.0),
             "pitch": ScalarKalmanFilter(1.0, 2.0),
@@ -2331,7 +2152,6 @@ class MotionCaptureEngine:
         """Filter translation with a pos/vel/accel state model and smooth attitude."""
         yaw_raw, pitch_raw, roll_raw = rotation_matrix_to_euler_zyx(rotation_matrix)
         
-        # Unwrap angles
         if self.last_unwrapped_angles is None:
             unwrapped_angles = {
                 "yaw": yaw_raw,
@@ -2411,7 +2231,6 @@ class MotionCaptureEngine:
             )
         ]
         
-        # Update previews and frame timing
         now = time.time()
         detected_led_counts = [len(leds) for leds in all_cam_leds]
         if (
@@ -2493,7 +2312,6 @@ class MotionCaptureEngine:
                 camera_pair_errors=pair_errors,
             )
 
-        # Extract and filter
         raw_rotation = pose.pop("rotation_matrix")
         translation = pose.pop("translation_vector")
         mapping_shifts = pose.pop("mapping_shifts", None)
@@ -2516,7 +2334,6 @@ class MotionCaptureEngine:
         pose["rotation"] = filtered_angles
         pose["detected_leds_per_camera"] = detected_led_counts
 
-        # Relabel preview LEDs using solved semantic ordering: Front, Right, Left.
         semantic_labels = ["F", "R", "L"]
         preview_leds = [list(leds) for leds in all_cam_leds]
         preview_labels = [None for _ in all_cam_leds]
@@ -2543,7 +2360,6 @@ class MotionCaptureEngine:
         ]
         self.last_preview_update = now
         
-        # Store for next iteration
         self.last_rotation = raw_rotation.copy()
         self.last_translation = translation.copy()
         if semantic_led_points is not None:
@@ -2566,14 +2382,10 @@ class ControlServer:
     def __init__(self):
         self.clients = set()
         self.control = ControlState()
-        self.imu_logger = ImuDataLogger(DATA_LOG_DIR)
         self.metrics_logger = ExperimentMetricsLogger(DATA_LOG_DIR)
         self.serial_bridge = SerialBridge()
-        self.serial_bridge.imu_sample_callback = self.handle_imu_sample
         self.mocap = MotionCaptureEngine()
         self.telemetry = default_telemetry()
-        self.last_serial_payload = None
-        self.last_serial_attempt_payload = None
         self.last_serial_payload_seq = 0
         self.last_serial_payload_size_bytes = 0
         self.last_serial_send_ok = False
@@ -2589,19 +2401,12 @@ class ControlServer:
         self.safe_landing_requested = False
         self.safe_landing_requested_at = 0.0
         self.safe_landing_reason = ""
-        self.battery_hover_filtered_voltage = 0.0
-        self.battery_hover_adjusted_throttle = self.control.limits["hoverThrottle"]
-        self.battery_hover_correction = 0.0
-        self.battery_hover_status = "disabled"
-        self.battery_hover_last_update = 0.0
         self.latest_mocap_log_sample = self.build_mocap_log_sample()
         self.last_mocap_yaw_unwrapped = None
         self.last_mocap_yaw_timestamp = 0.0
         self.backend_loop_hz = 0.0
         self._last_backend_loop_at = 0.0
-        self.logging_status = (
-            "Idle. Start a logging session from the frontend when ready."
-        )
+        self.logging_status = ""
         self.session_vision_metrics_baseline = self.mocap.get_metrics_state()
         self.session_bridge_metrics_baseline = copy.deepcopy(
             self.serial_bridge.latest_bridge_metrics
@@ -2611,7 +2416,6 @@ class ControlServer:
         )
         self.session_serial_payload_seq_baseline = 0
         self.metrics_log_path = None
-        self.imu_log_path = None
         self.state_lock = asyncio.Lock()
 
     def build_mocap_log_sample(self, telemetry=None, yaw_rate=0.0):
@@ -2660,13 +2464,6 @@ class ControlServer:
         self.last_mocap_yaw_timestamp = float(sample_time)
         self.latest_mocap_log_sample = self.build_mocap_log_sample(telemetry, yaw_rate)
 
-    def handle_imu_sample(self, sample, sample_time):
-        self.imu_logger.log_sample(
-            sample,
-            sample_time,
-            mocap_sample=self.latest_mocap_log_sample,
-        )
-
     def is_logging_active(self):
         return self.metrics_logger.is_active()
 
@@ -2707,17 +2504,13 @@ class ControlServer:
         )
 
     def start_logging_session(self, status_message=None):
-        self.imu_logger.stop()
-        self.imu_log_path = None
         self.reset_session_metric_baselines()
         metrics_log_path = self.metrics_logger.start()
         if metrics_log_path is not None:
             self.metrics_log_path = str(metrics_log_path)
 
         if self.metrics_logger.is_active():
-            self.logging_status = status_message or (
-                "Logging session active. Click the button again to stop and save the combined session_metrics CSV."
-            )
+            self.logging_status = status_message or "Logging active."
             return True
 
         self.logging_status = "Logging session could not be started cleanly."
@@ -2725,15 +2518,11 @@ class ControlServer:
 
     def stop_logging_session(self, status_message=None):
         metrics_log_path = self.metrics_logger.stop()
-        self.imu_logger.stop()
         if metrics_log_path is not None:
             self.metrics_log_path = str(metrics_log_path)
-        self.imu_log_path = None
 
         if self.metrics_log_path:
-            self.logging_status = status_message or (
-                "Logging session stopped. Combined metrics and IMU data were saved under backend/data_logs/."
-            )
+            self.logging_status = status_message or "Logging stopped. CSV saved under backend/data_logs/."
         else:
             self.logging_status = "Logging session stopped."
         return True
@@ -2783,121 +2572,6 @@ class ControlServer:
             hover_throttle - SAFE_LANDING_MIN_THROTTLE_DROP,
         )
         return max(0.0, min(target_throttle, 1.0))
-
-    def get_battery_hover_compensation_config(self):
-        return sanitize_battery_hover_compensation_config(
-            self.control.battery_hover_compensation
-        )
-
-    def update_battery_hover_compensation(self, sample_time=None):
-        sample_time = float(sample_time or time.time())
-        limits = sanitize_limit_config(self.control.limits)
-        base_hover = limits["hoverThrottle"]
-        config = self.get_battery_hover_compensation_config()
-        battery = self.serial_bridge.get_latest_battery()
-
-        if not config["enabled"]:
-            self.battery_hover_filtered_voltage = 0.0
-            self.battery_hover_adjusted_throttle = base_hover
-            self.battery_hover_correction = 0.0
-            self.battery_hover_status = "disabled"
-            self.battery_hover_last_update = sample_time
-            return
-
-        if not battery.get("ready", False):
-            self.battery_hover_adjusted_throttle = base_hover
-            self.battery_hover_correction = 0.0
-            self.battery_hover_status = "battery_unavailable"
-            self.battery_hover_last_update = sample_time
-            return
-
-        voltage = coerce_finite_float(battery.get("cell_voltage"), 0.0)
-        if voltage <= 0.0:
-            voltage = coerce_finite_float(battery.get("voltage"), 0.0)
-        if not 0.0 < voltage <= 6.0:
-            self.battery_hover_adjusted_throttle = base_hover
-            self.battery_hover_correction = 0.0
-            self.battery_hover_status = "battery_invalid"
-            self.battery_hover_last_update = sample_time
-            return
-
-        dt = (
-            max(0.0, sample_time - self.battery_hover_last_update)
-            if self.battery_hover_last_update > 0.0
-            else 0.0
-        )
-        if self.battery_hover_filtered_voltage <= 0.0 or dt <= 0.0:
-            self.battery_hover_filtered_voltage = voltage
-        else:
-            alpha = min(1.0, dt / config["filterTimeConstant"])
-            self.battery_hover_filtered_voltage += (
-                (voltage - self.battery_hover_filtered_voltage) * alpha
-            )
-
-        raw_correction = config["gain"] * (
-            config["nominalVoltage"] - self.battery_hover_filtered_voltage
-        )
-        target_correction = max(
-            -config["maxCorrection"],
-            min(raw_correction, config["maxCorrection"]),
-        )
-        min_hover = max(
-            limits["minThrottle"],
-            min(config["minHoverThrottle"], limits["maxThrottle"]),
-        )
-        max_hover = max(
-            min_hover,
-            min(limits["maxThrottle"], config["maxHoverThrottle"]),
-        )
-        target_hover = max(
-            min_hover,
-            min(base_hover + target_correction, max_hover),
-        )
-
-        previous_hover = self.battery_hover_adjusted_throttle or base_hover
-        max_delta = config["rateLimitPerSecond"] * dt
-        if max_delta <= 0.0:
-            adjusted_hover = previous_hover
-        else:
-            adjusted_hover = previous_hover + max(
-                -max_delta,
-                min(target_hover - previous_hover, max_delta),
-            )
-
-        self.battery_hover_adjusted_throttle = max(
-            min_hover,
-            min(adjusted_hover, max_hover),
-        )
-        self.battery_hover_correction = self.battery_hover_adjusted_throttle - base_hover
-        self.battery_hover_status = "active"
-        self.battery_hover_last_update = sample_time
-
-    def get_effective_hover_throttle(self):
-        return max(
-            0.0,
-            min(
-                coerce_float(
-                    self.battery_hover_adjusted_throttle,
-                    self.control.limits["hoverThrottle"],
-                ),
-                1.0,
-            ),
-        )
-
-    def build_battery_hover_compensation_status(self):
-        config = self.get_battery_hover_compensation_config()
-        return {
-            "enabled": bool(config["enabled"]),
-            "status": self.battery_hover_status,
-            "baseHoverThrottle": round(
-                coerce_float(self.control.limits.get("hoverThrottle"), 0.0),
-                4,
-            ),
-            "adjustedHoverThrottle": round(self.get_effective_hover_throttle(), 4),
-            "correction": round(self.battery_hover_correction, 4),
-            "filteredVoltage": round(self.battery_hover_filtered_voltage, 3),
-            "config": config,
-        }
 
     def reset_safe_landing_state(self):
         self.safe_landing_tracking_lost_since = 0.0
@@ -2949,7 +2623,6 @@ class ControlServer:
         imu_level_pending = self.is_imu_level_calibration_pending()
         safe_landing_requested = self.safe_landing_requested and self.control.armed
         safe_landing_throttle = self.get_safe_landing_target_throttle()
-        effective_hover_throttle = self.get_effective_hover_throttle()
         self.serial_payload_sequence += 1
         payload_sequence = int(self.serial_payload_sequence)
 
@@ -2989,7 +2662,7 @@ class ControlServer:
                 ],
                 "u": compact_pid_bundle(self.control.pid, pid_digits),
                 "m": [
-                    compact_numeric(effective_hover_throttle, throttle_digits),
+                    compact_numeric(self.control.limits["hoverThrottle"], throttle_digits),
                     compact_numeric(self.control.limits["minThrottle"], throttle_digits),
                     compact_numeric(self.control.limits["maxThrottle"], throttle_digits),
                     compact_numeric(self.control.limits["maxTiltDeg"], angle_limit_digits),
@@ -3058,12 +2731,10 @@ class ControlServer:
             vision_metrics = self.get_session_vision_metrics()
             bridge_metrics = self.get_session_bridge_metrics()
             controller_metrics = self.get_session_controller_metrics()
-            serial_payload_seq = self.get_session_serial_payload_seq()
         else:
             vision_metrics = self.mocap.get_metrics_summary()
             bridge_metrics = copy.deepcopy(self.serial_bridge.latest_bridge_metrics)
             controller_metrics = copy.deepcopy(self.serial_bridge.latest_controller_metrics)
-            serial_payload_seq = self.last_serial_payload_seq
         return {
             "type": "state",
             "control": {
@@ -3074,7 +2745,6 @@ class ControlServer:
                 "target": self.control.target,
                 "limits": self.control.limits,
                 "pid": self.control.pid,
-                "batteryHoverCompensation": self.control.battery_hover_compensation,
             },
             "telemetry": self.telemetry,
             "system": {
@@ -3097,10 +2767,6 @@ class ControlServer:
                 "serialForwarding": serial_send_enabled and self.last_serial_send_ok,
                 "lastSerialSendOk": self.last_serial_send_ok,
                 "lastSerialSendError": self.last_serial_send_error,
-                "lastSerialAttemptPayload": self.last_serial_attempt_payload,
-                "lastSerialPayload": self.last_serial_payload,
-                "lastSerialPayloadSeq": serial_payload_seq,
-                "lastSerialPayloadSizeBytes": self.last_serial_payload_size_bytes,
                 "safeLanding": self.build_safe_landing_status(),
                 "imuLevelCalibrationPending": self.is_imu_level_calibration_pending(),
                 "imuLevelCalibrationSent": self.imu_level_calibration_sent,
@@ -3109,7 +2775,6 @@ class ControlServer:
                 "loggingActive": self.is_logging_active(),
                 "loggingStatus": self.logging_status,
                 "metricsLogPath": self.metrics_log_path,
-                "imuLogPath": self.imu_log_path,
                 "metrics": {
                     "backendLoopHz": round(self.backend_loop_hz, 2),
                     "vision": vision_metrics,
@@ -3160,12 +2825,6 @@ class ControlServer:
                         self.control.target = sanitize_target_config(control_payload["target"])
                     if "limits" in control_payload:
                         self.control.limits = sanitize_limit_config(control_payload["limits"])
-                    if "batteryHoverCompensation" in control_payload:
-                        self.control.battery_hover_compensation = (
-                            sanitize_battery_hover_compensation_config(
-                                control_payload["batteryHoverCompensation"]
-                            )
-                        )
                     if not self.control.active:
                         self.control.armed = False
 
@@ -3181,9 +2840,7 @@ class ControlServer:
 
                     if self.control.armed and not previous_armed and not self.is_logging_active():
                         self.start_logging_session(
-                            status_message=(
-                                "Logging session started automatically because the drone was armed."
-                            )
+                            status_message="Logging started when armed."
                         )
                     elif (
                         previous_armed
@@ -3191,9 +2848,7 @@ class ControlServer:
                         and self.is_logging_active()
                     ):
                         self.stop_logging_session(
-                            status_message=(
-                                "Logging session stopped automatically because the drone was disarmed."
-                            )
+                            status_message="Logging stopped when disarmed."
                         )
                 elif message_type == "refresh_serial_ports":
                     self.serial_bridge.refresh_ports(force=True)
@@ -3271,10 +2926,6 @@ class ControlServer:
                         )
                         self.update_mocap_log_sample(self.telemetry, time.time())
                     self.update_safe_landing_state(time.time())
-                    self.update_battery_hover_compensation(time.time())
-                    self.telemetry["battery_hover_compensation"] = (
-                        self.build_battery_hover_compensation_status()
-                    )
                     imu_level_pending = self.is_imu_level_calibration_pending()
                     should_send_serial = (
                         (self.control.active and self.serial_bridge.is_connected())
@@ -3283,7 +2934,6 @@ class ControlServer:
 
                     if should_send_serial and self.control.serial_port:
                         drone_index, serial_payload = self.build_serial_payload()
-                        self.last_serial_attempt_payload = serial_payload
                         self.last_serial_payload_seq = coerce_int(
                             serial_payload.get("s"),
                             self.last_serial_payload_seq,
@@ -3292,7 +2942,6 @@ class ControlServer:
                             serial_payload
                         )
                         if self.serial_bridge.send(drone_index, serial_payload):
-                            self.last_serial_payload = serial_payload
                             self.last_serial_send_ok = True
                             self.last_serial_send_error = ""
                             if imu_level_pending:
@@ -3323,7 +2972,6 @@ class ControlServer:
                             )
                         if not self.control.active and not imu_level_pending:
                             self.last_serial_send_error = ""
-                            self.last_serial_attempt_payload = None
                         elif not self.serial_bridge.is_connected():
                             self.last_serial_send_error = (
                                 self.serial_bridge.last_error or "Serial link not connected."
@@ -3331,10 +2979,6 @@ class ControlServer:
                     self.serial_bridge.poll_incoming()
                     self.telemetry["imu"] = self.serial_bridge.get_latest_imu()
                     self.telemetry["battery"] = self.serial_bridge.get_latest_battery()
-                    self.update_battery_hover_compensation(time.time())
-                    self.telemetry["battery_hover_compensation"] = (
-                        self.build_battery_hover_compensation_status()
-                    )
                     vision_metrics = (
                         self.get_session_vision_metrics()
                         if self.is_logging_active()
@@ -3377,10 +3021,6 @@ class ControlServer:
                     None,
                     self.serial_bridge.get_latest_imu(),
                     self.serial_bridge.get_latest_battery(),
-                )
-                self.update_battery_hover_compensation(time.time())
-                self.telemetry["battery_hover_compensation"] = (
-                    self.build_battery_hover_compensation_status()
                 )
                 self.update_mocap_log_sample(self.telemetry, time.time())
                 self.mocap.camera_error = f"Tracking loop failed: {exc}"
@@ -3431,7 +3071,6 @@ class ControlServer:
 
     async def close(self):
         self.serial_bridge.disconnect()
-        self.imu_logger.close()
         self.metrics_logger.close()
         self.mocap.close()
 

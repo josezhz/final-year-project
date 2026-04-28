@@ -9,8 +9,8 @@ This branch is the Betaflight flight-controller variant. Instead of running the 
 The project is built around a multi-camera infrared tracking workflow that detects active markers, reconstructs their 3D position, and uses that localization data to support closed-loop drone control. In this branch, the repository includes:
 
 - camera calibration utilities for intrinsic and extrinsic setup
-- a backend tracking server for marker detection, triangulation, pose estimation, logging, and serial transport
-- a frontend dashboard for operator setup, activation, target selection, and PID tuning
+- a backend tracking server for marker detection, triangulation, pose estimation, session logging, and serial transport
+- a frontend dashboard for operator setup, activation, target selection, and outer-loop PID tuning
 - an `esp32-s3-sender` bridge that receives compact control frames over USB serial and forwards them over ESP-NOW
 - an `esp32-s3-receiver` node that converts those mocap control payloads into CRSF RC frames for a Betaflight-compatible flight controller
 
@@ -41,7 +41,7 @@ The backend in `backend/index.py` uses OpenCV, NumPy, `pseyepy`, `websockets`, a
 - detect LED marker points from the configured camera feeds
 - estimate 3D pose from multi-view triangulation
 - accept activation, serial settings, target inputs, limits, and PID values from the frontend over WebSocket
-- maintain logging for motion, bridge, controller, and IMU-related telemetry
+- maintain session logging for motion, bridge, controller, battery, and IMU-related telemetry
 - stream compact serial frames to the ESP32-S3 sender only when camera and serial readiness checks pass
 
 Calibration-related resources are stored under `backend/calibration/`, including scripts for image capture and intrinsic/extrinsic calibration.
@@ -64,13 +64,10 @@ The dashboard is responsible for operator input and monitoring, including:
 - baud rate
 - stream activation and motor arming
 - target `x`, `y`, `z`, and `yaw` hover coordinates
-- outer-loop PID parameters for `x`, `y`, `z`, and `yaw`
-- inner-loop PID parameters for `roll`, `pitch`, and `yaw rate`
+- outer-loop PID parameters for position, yaw, and velocity damping
 - hover throttle and attitude limits
 - camera previews, pose plots, and readiness feedback
-- logging and payload/debug visibility
-
-The repository also includes `backend/data_logs/dashboard.html` for reviewing logged experiment data.
+- session logging controls
 
 ## ESP32 and Flight Controller Components
 
@@ -119,5 +116,6 @@ Setup notes:
 
 - This README describes the Betaflight flight-controller branch, not the earlier ESP-drone control path.
 - `frontend/node_modules/` is intentionally ignored and should not be committed.
-- Calibration assets under `backend/calibration/` are currently tracked in the repository.
-- This repository is structured as an implementation-focused project artifact, so it contains both development code and supporting calibration/logging assets.
+- Calibration parameters under `backend/calibration/` are tracked; raw capture images under `backend/calibration/calib_img/` are ignored.
+- Runtime session logs are written under `backend/data_logs/` and are intentionally ignored by Git.
+- This repository is structured as an implementation-focused project artifact, so it contains development code and supporting calibration assets.

@@ -9,14 +9,6 @@ const EMPTY_TELEMETRY = {
   rotation: { yaw: 0, pitch: 0, roll: 0 },
   imu: { ready: false, pitch: 0, roll: 0, pitch_rate: 0, roll_rate: 0 },
   battery: { ready: false, voltage: 0, cell_voltage: 0, current: 0, capacity_mah: 0, remaining_percent: -1 },
-  battery_hover_compensation: {
-    enabled: false,
-    status: 'disabled',
-    baseHoverThrottle: 0,
-    adjustedHoverThrottle: 0,
-    correction: 0,
-    filteredVoltage: 0,
-  },
   error: 0,
   mapping_error_px: 0,
   model_fit_error_m: 0,
@@ -33,9 +25,6 @@ const DEFAULT_PID = {
   yawPos: { kp: 0.3, ki: 0.1, kd: 0.05 },
   xyVel: { kp: 0.2, ki: 0.03, kd: 0.05 },
   zVel: { kp: 0.3, ki: 0.1, kd: 0.05 },
-  roll: { kp: 0.022, ki: 0, kd: 0.0014 },
-  pitch: { kp: 0.022, ki: 0, kd: 0.0014 },
-  yawRate: { kp: 0.006, ki: 0, kd: 0 },
 };
 const DEFAULT_TARGET = {
   x: 0,
@@ -78,8 +67,6 @@ const EMPTY_SYSTEM = {
   serialForwarding: false,
   lastSerialSendOk: false,
   lastSerialSendError: '',
-  lastSerialAttemptPayload: null,
-  lastSerialPayload: null,
   imuLevelCalibrationPending: false,
   imuLevelCalibrationSent: false,
   imuLevelCalibrationSequence: 0,
@@ -87,7 +74,6 @@ const EMPTY_SYSTEM = {
   loggingActive: false,
   loggingStatus: '',
   metricsLogPath: '',
-  imuLogPath: '',
 };
 
 const TRAJECTORY_WINDOW_MS = 3000;
@@ -186,7 +172,6 @@ function CameraRig({ camera }) {
   const xAxisEnd = toScenePoint(addScaled(worldPosition, axes.x, axisLength));
   const yAxisEnd = toScenePoint(addScaled(worldPosition, axes.y, axisLength));
   const zAxisEnd = toScenePoint(addScaled(worldPosition, axes.z, axisLength));
-  const frustumCenter = toScenePoint(addScaled(worldPosition, axes.z, frustumLength));
   const frustumCorners = [
     toScenePoint(addScaled(addScaled(addScaled(worldPosition, axes.z, frustumLength), axes.x, frustumHalfSize), axes.y, frustumHalfSize)),
     toScenePoint(addScaled(addScaled(addScaled(worldPosition, axes.z, frustumLength), axes.x, frustumHalfSize), axes.y, -frustumHalfSize)),
@@ -820,7 +805,6 @@ function PidAxisCard({
   tone,
   axisLabel,
   title,
-  description,
   pid,
   step,
   liveLabel,
@@ -833,7 +817,6 @@ function PidAxisCard({
   errorValue,
   errorDigits = 3,
   unit = '',
-  note,
   onChange,
 }) {
   return (
@@ -843,10 +826,8 @@ function PidAxisCard({
           <span className="meta-label">{axisLabel}</span>
           <h3>{title}</h3>
         </div>
-        <span className="axis-chip">{tone === 'outer' ? 'Outer loop' : 'Inner loop'}</span>
+        <span className="axis-chip">Outer loop</span>
       </div>
-
-      <p className="axis-copy">{description}</p>
 
       <div className="pid-readout-grid">
         <div className="pid-readout">
@@ -885,8 +866,6 @@ function PidAxisCard({
           </label>
         ))}
       </div>
-
-      <p className="axis-note">{note}</p>
     </div>
   );
 }
@@ -1091,24 +1070,11 @@ function App() {
   const batteryVoltage = Number(battery.cell_voltage ?? battery.voltage ?? 0);
   const batteryCurrent = Number(battery.current ?? 0);
   const batteryPercent = Number(battery.remaining_percent ?? -1);
-  const batteryHoverCompensation = telemetry.battery_hover_compensation ?? {};
   const batteryTone = getBatteryTone(batteryVoltage, batteryReady);
   const batteryLabel = getBatteryLabel(batteryVoltage, batteryReady);
   const batteryPercentLabel = batteryPercent >= 0 && batteryPercent <= 100
     ? `${batteryPercent.toFixed(0)}%`
     : 'n/a';
-  const hoverCompStatus = batteryHoverCompensation.status || (
-    batteryHoverCompensation.enabled ? 'enabled' : 'disabled'
-  );
-  const adjustedHoverThrottle = Number(
-    batteryHoverCompensation.adjustedHoverThrottle
-      ?? batteryHoverCompensation.baseHoverThrottle
-      ?? localControl.limits.hoverThrottle
-      ?? 0,
-  );
-  const batteryDetail = batteryReady
-    ? `${formatNumber(batteryVoltage, 2)} V cell / ${batteryPercentLabel}`
-    : 'No CRSF battery telemetry yet';
   const targetError = {
     x: Number(localControl.target.x ?? 0) - livePosition.x,
     y: Number(localControl.target.y ?? 0) - livePosition.y,
@@ -1142,22 +1108,14 @@ function App() {
     imuLevelCalibrationTone = 'ready';
     imuLevelCalibrationLabel = 'Request sent';
   }
-  const imuLevelCalibrationStatus = system.imuLevelCalibrationStatus || (
-    serverControl.serialPort
-      ? 'No IMU level calibration has been sent yet this session.'
-      : 'Apply a serial port selection before sending the IMU level request.'
-  );
+  const imuLevelCalibrationStatus = system.imuLevelCalibrationStatus || '';
   const loggingSessionTone = system.loggingActive
     ? 'ready'
     : connectionState === 'Connected'
       ? 'pending'
       : 'blocked';
   const loggingSessionLabel = system.loggingActive ? 'Logging active' : 'Logging idle';
-  const loggingSessionStatus = system.loggingStatus || (
-    connectionState === 'Connected'
-      ? 'Click start logging session to begin recording one combined session CSV with metrics and IMU traces. Arming also starts logging automatically, and disarming stops it.'
-      : 'Reconnect the frontend before starting a logging session.'
-  );
+  const loggingSessionStatus = system.loggingStatus || '';
   const latestMetricsLogName = system.metricsLogPath
     ? system.metricsLogPath.split(/[/\\]/).pop()
     : 'Not started';
@@ -1247,8 +1205,7 @@ function App() {
       id: 'x-pos',
       pidAxis: 'xyPos',
       axisLabel: 'X position',
-      title: 'Lock the forward lane',
-      description: 'In the mocap frame, +X is forward. This card shares one XY position profile with Y, matching the Low-Cost-Mocap cascade.',
+      title: 'X hold',
       liveLabel: 'Current X',
       liveValue: livePosition.x,
       targetLabel: 'Target X',
@@ -1257,14 +1214,12 @@ function App() {
       errorValue: targetError.x,
       unit: ' m',
       step: '0.01',
-      note: 'These gains generate desired world velocity rather than direct tilt, so keep X and Y tuned together.',
     },
     {
       id: 'y-pos',
       pidAxis: 'xyPos',
       axisLabel: 'Y position',
-      title: 'Correct left-right drift',
-      description: 'In the mocap frame, +Y is left. This is the second readout of the same shared XY position controller.',
+      title: 'Y hold',
       liveLabel: 'Current Y',
       liveValue: livePosition.y,
       targetLabel: 'Target Y',
@@ -1273,14 +1228,12 @@ function App() {
       errorValue: targetError.y,
       unit: ' m',
       step: '0.01',
-      note: 'Use this card to watch lateral symmetry while editing the shared XY position gains above.',
     },
     {
       id: 'z-pos',
       pidAxis: 'zPos',
       axisLabel: 'Z altitude',
-      title: 'Balance the hover column',
-      description: 'Altitude error now becomes a desired climb rate first, which then passes through the vertical velocity loop before throttle is mixed.',
+      title: 'Z hold',
       liveLabel: 'Current Z',
       liveValue: livePosition.z,
       targetLabel: 'Target Z',
@@ -1289,14 +1242,12 @@ function App() {
       errorValue: targetError.z,
       unit: ' m',
       step: '0.01',
-      note: 'Set the climb response you want here, then use the Z velocity card below to remove bounce and floatiness.',
     },
     {
       id: 'yaw-pos',
       pidAxis: 'yawPos',
       axisLabel: 'Yaw heading',
-      title: 'Point the frame cleanly',
-      description: 'Heading should settle before you trust XY response, and a 0 deg target means nose aligned with world +X.',
+      title: 'Yaw hold',
       liveLabel: 'Current yaw',
       liveValue: liveRotation.yaw,
       targetLabel: 'Target yaw',
@@ -1308,14 +1259,12 @@ function App() {
       errorDigits: 2,
       unit: ' deg',
       step: '0.01',
-      note: 'This remains a conventional outer yaw loop that commands yaw rate into the inner gyro controller.',
     },
     {
       id: 'xy-vel',
       pidAxis: 'xyVel',
       axisLabel: 'XY velocity',
-      title: 'Damp lateral momentum',
-      description: 'This is the Low-Cost-Mocap-style damping stage: desired world velocity is compared against mocap velocity before tilt is commanded.',
+      title: 'XY damping',
       liveLabel: 'Horizontal speed',
       liveValue: liveHorizontalSpeed,
       targetLabel: 'Steady hover',
@@ -1324,14 +1273,12 @@ function App() {
       errorValue: liveHorizontalSpeed,
       unit: ' m/s',
       step: '0.01',
-      note: 'Increase these gains once the shared XY position loop is reasonable, then stop when overshoot and drift start to vanish.',
     },
     {
       id: 'z-vel',
       pidAxis: 'zVel',
       axisLabel: 'Z velocity',
-      title: 'Settle climb and sink rate',
-      description: 'The vertical damping loop compares desired climb rate with measured mocap Z velocity before throttle is adjusted.',
+      title: 'Z damping',
       liveLabel: 'Vertical speed',
       liveValue: liveVelocity.z,
       targetLabel: 'Steady hover',
@@ -1340,63 +1287,6 @@ function App() {
       errorValue: liveVelocity.z,
       unit: ' m/s',
       step: '0.01',
-      note: 'Use this card to remove altitude bounce. Add Ki only if steady hover still drifts after damping is stable.',
-    },
-  ];
-  const innerLoopCards = [
-    {
-      axis: 'roll',
-      axisLabel: 'Roll hold',
-      title: 'Stiffen lateral attitude',
-      description: 'These gains close the fast loop around the MPU6050 and clean up side-to-side tilt.',
-      liveLabel: 'Mocap roll',
-      liveValue: liveRotation.roll,
-      targetLabel: 'Trim target',
-      targetValue: 0,
-      errorLabel: 'Roll offset',
-      errorValue: -liveRotation.roll,
-      liveDigits: 2,
-      targetDigits: 2,
-      errorDigits: 2,
-      unit: ' deg',
-      step: '0.0001',
-      note: 'The actual feedback lives on the drone; this readout is a mocap cross-check.',
-    },
-    {
-      axis: 'pitch',
-      axisLabel: 'Pitch hold',
-      title: 'Clean up fore-aft attitude',
-      description: 'Pitch damping is what stops forward corrections from turning into a pogoing hover.',
-      liveLabel: 'Mocap pitch',
-      liveValue: liveRotation.pitch,
-      targetLabel: 'Trim target',
-      targetValue: 0,
-      errorLabel: 'Pitch offset',
-      errorValue: -liveRotation.pitch,
-      liveDigits: 2,
-      targetDigits: 2,
-      errorDigits: 2,
-      unit: ' deg',
-      step: '0.0001',
-      note: 'Raise Kd until the nose stops snapping past level after a brief disturbance.',
-    },
-    {
-      axis: 'yawRate',
-      axisLabel: 'Yaw rate',
-      title: 'Damp spin authority',
-      description: 'This loop catches rotational velocity after the outer yaw loop requests a heading correction.',
-      liveLabel: 'Yaw cap (deg/s)',
-      liveValue: localControl.limits.maxYawRateDeg,
-      targetLabel: 'Live yaw (deg)',
-      targetValue: liveRotation.yaw,
-      errorLabel: 'Target yaw (deg)',
-      errorValue: localControl.target.yaw,
-      liveDigits: 1,
-      targetDigits: 2,
-      errorDigits: 2,
-      unit: '',
-      step: '0.0001',
-      note: 'Pair this with the yaw-rate limit so the brushed motors do not saturate during turns.',
     },
   ];
   const heroStatusCards = [
@@ -1502,21 +1392,6 @@ function App() {
       tone: system.loggingActive ? 'ready' : 'pending',
     },
   ];
-  const debugPayloadText = system.lastSerialPayload
-    ? JSON.stringify(system.lastSerialPayload, null, 2)
-    : system.lastSerialAttemptPayload
-      ? `No successful payload has been sent yet.\n\nLast attempt status: ${system.lastSerialSendError || 'Pending'}\n\n${JSON.stringify(system.lastSerialAttemptPayload, null, 2)}`
-      : 'No payload has been sent yet.';
-  const payloadTone = system.lastSerialSendError
-    ? 'blocked'
-    : system.lastSerialPayload
-      ? 'ready'
-      : 'pending';
-  const payloadStatusLabel = system.lastSerialSendError
-    ? 'Needs attention'
-    : system.lastSerialPayload
-      ? 'Payload ready'
-      : 'Awaiting data';
   const allPrimaryLinksReady = (
     connectionState === 'Connected'
     && system.serialConnected
@@ -1525,49 +1400,35 @@ function App() {
   const hoverPathReady = allPrimaryLinksReady && system.canSendToEsp32 && serverControl.active;
   let readinessTone = 'pending';
   let readinessTitle = 'Almost ready';
-  let readinessDetail = 'Finish the remaining steps below to start a controlled hover session.';
   if (serverControl.armed) {
     readinessTone = 'pending';
     readinessTitle = 'Motors are armed';
-    readinessDetail = 'Keep the live state and motion panels in view while the vehicle is allowed to spin its motors.';
   } else if (hoverPathReady) {
     readinessTone = 'ready';
     readinessTitle = 'Ready for hover';
-    readinessDetail = 'Tracking, sender routing, and the live command stream are all available. Arm only when the area is clear.';
   } else if (!allPrimaryLinksReady) {
     readinessTone = 'blocked';
     readinessTitle = 'System not ready';
-    readinessDetail = 'One or more required links are still offline, so the system is not ready to fly yet.';
   }
   let nextActionTitle = 'Start the command stream';
-  let nextActionDetail = 'The sender and tracking are in place. Start streaming control frames before arming.';
   if (connectionState !== 'Connected') {
     nextActionTitle = 'Reconnect the dashboard';
-    nextActionDetail = 'The frontend is not connected to the backend WebSocket, so no live control changes can be sent.';
   } else if (!localControl.serialPort) {
     nextActionTitle = 'Choose the sender COM port';
-    nextActionDetail = 'Select the ESP32-S3 sender port first so the backend knows where to route control data.';
   } else if (isDirty) {
     nextActionTitle = 'Apply pending changes';
-    nextActionDetail = 'You have unsent settings. Apply them so the backend uses the latest port, target, limits, and tuning values.';
   } else if (!system.serialConnected) {
     nextActionTitle = 'Connect the sender link';
-    nextActionDetail = 'The selected sender port has not connected yet. Confirm the board is present and apply the selection again if needed.';
   } else if (!system.camerasReady) {
     nextActionTitle = 'Wait for tracking to recover';
-    nextActionDetail = system.cameraError || `Only ${system.connectedCameras} of ${system.expectedCameras} cameras are currently ready.`;
   } else if (!serverControl.active) {
     nextActionTitle = 'Start the command stream';
-    nextActionDetail = 'Tracking and serial are available, but the backend is not yet forwarding live control frames.';
   } else if (!system.canSendToEsp32) {
     nextActionTitle = 'Wait for the sender path';
-    nextActionDetail = system.lastSerialSendError || 'The stream is up, but the sender path is not ready for successful serial writes yet.';
   } else if (!serverControl.armed) {
     nextActionTitle = 'Arm only when the area is clear';
-    nextActionDetail = 'The control path is ready. Confirm the hover target and safety limits, then arm the motors when safe.';
   } else {
     nextActionTitle = 'Monitor hover and logging';
-    nextActionDetail = 'Use the live state, camera views, and trend plots to watch the vehicle while it is armed.';
   }
 
   return (
@@ -1577,11 +1438,6 @@ function App() {
           <div>
             <p className="eyebrow">Operator console</p>
             <h1>Hover control dashboard</h1>
-            <p className="hero-copy">
-              Keep system readiness, core actions, and live hover behaviour in one calm view.
-              Advanced tuning and raw debug tools stay available below when you need them, but
-              they no longer take over the default screen.
-            </p>
           </div>
 
           <div className="hero-status-grid">
@@ -1606,13 +1462,11 @@ function App() {
                 <span className="meta-label">Overall state</span>
                 <strong>{readinessTitle}</strong>
               </div>
-              <p>{readinessDetail}</p>
             </div>
 
             <div className="next-step-card">
               <span className="meta-label">Next step</span>
               <strong>{nextActionTitle}</strong>
-              <p>{nextActionDetail}</p>
             </div>
 
             <div className="gate-grid">
@@ -1732,11 +1586,6 @@ function App() {
                 <strong>{latestMetricsLogName}</strong>
               </div>
             </div>
-
-            <p className="hint">
-              Start the command stream before arming. Capturing the current mocap pose is the
-              fastest way to set a safe hover target.
-            </p>
 
             <div className="control-stack">
               <DisclosureSection
@@ -1859,11 +1708,6 @@ function App() {
                       <span className="meta-label">Logging session</span>
                       <strong>Manual start and stop</strong>
                     </div>
-                    <p className="axis-copy">
-                      Start a session when you are ready to record report data, or just arm the
-                      drone and let logging begin automatically. Disarming ends the session, and
-                      the same button still lets you start or stop logging manually.
-                    </p>
                     <div className="action-row">
                       <button
                         className={`toggle-button toggle-button-stream ${system.loggingActive ? 'active' : ''}`}
@@ -1874,15 +1718,11 @@ function App() {
                       </button>
                       <span className={`pill ${loggingSessionTone}`}>{loggingSessionLabel}</span>
                     </div>
-                    <p className="hint">{loggingSessionStatus}</p>
+                    {loggingSessionStatus ? <p className="hint">{loggingSessionStatus}</p> : null}
                     <div className="system-list compact">
                       <div>
                         <span>Session log</span>
                         <strong>{latestMetricsLogName}</strong>
-                      </div>
-                      <div>
-                        <span>IMU fields</span>
-                        <strong>Included in session CSV</strong>
                       </div>
                     </div>
                   </div>
@@ -1892,10 +1732,6 @@ function App() {
                       <span className="meta-label">IMU level trim</span>
                       <strong>Set horizontal zero</strong>
                     </div>
-                    <p className="axis-copy">
-                      Place the drone on a flat surface with the motors disarmed, then capture the
-                      current attitude as roll and pitch zero on the ESP32-S2.
-                    </p>
                     <div className="action-row">
                       <button
                         className="ghost-button"
@@ -1906,7 +1742,7 @@ function App() {
                       </button>
                       <span className={`pill ${imuLevelCalibrationTone}`}>{imuLevelCalibrationLabel}</span>
                     </div>
-                    <p className="hint">{imuLevelCalibrationStatus}</p>
+                    {imuLevelCalibrationStatus ? <p className="hint">{imuLevelCalibrationStatus}</p> : null}
                   </div>
                 </div>
               </DisclosureSection>
@@ -1955,16 +1791,7 @@ function App() {
                   <span>Current</span>
                   <strong>{batteryReady ? `${formatNumber(batteryCurrent, 2)} A` : 'n/a'}</strong>
                 </div>
-                <div>
-                  <span>Hover comp</span>
-                  <strong>{hoverCompStatus}</strong>
-                </div>
-                <div>
-                  <span>Adjusted hover</span>
-                  <strong>{formatNumber(adjustedHoverThrottle, 3)}</strong>
-                </div>
               </div>
-              <p className="hint">{batteryDetail}</p>
             </div>
 
             <div className="pid-summary-grid">
@@ -2099,19 +1926,6 @@ function App() {
                 ))}
               </div>
 
-              <div className="pid-focus-banner">
-                <div>
-                  <span className="meta-label">Workflow</span>
-                  <strong>Tune the cascade outside-in</strong>
-                </div>
-                <p>
-                  Start with the shared XY and Z position gains, then tune the XY and Z velocity
-                  damping stage borrowed from Low-Cost-Mocap, and only then tighten the
-                  roll, pitch, and yaw-rate loops. In this project that cascade feeds CRSF
-                  channel commands for the Betaflight flight controller.
-                </p>
-              </div>
-
               <div className="pid-loops-grid">
                 <section className="loop-section">
                   <div className="loop-head">
@@ -2119,10 +1933,6 @@ function App() {
                       <span className="meta-label">Outer loop</span>
                       <strong>World-frame position, heading, and velocity</strong>
                     </div>
-                    <p>
-                      The X and Y cards intentionally share one XY position profile, followed by
-                      separate XY and Z velocity damping cards.
-                    </p>
                   </div>
                   <div className="pid-card-grid">
                     {outerLoopCards.map((card) => (
@@ -2131,7 +1941,6 @@ function App() {
                         tone="outer"
                         axisLabel={card.axisLabel}
                         title={card.title}
-                        description={card.description}
                         pid={localControl.pid[card.pidAxis] ?? DEFAULT_PID[card.pidAxis]}
                         step={card.step}
                         liveLabel={card.liveLabel}
@@ -2144,76 +1953,12 @@ function App() {
                         errorValue={card.errorValue}
                         errorDigits={card.errorDigits}
                         unit={card.unit}
-                        note={card.note}
                         onChange={(term, value) => updatePidValue(card.pidAxis, term, value)}
                       />
                     ))}
                   </div>
                 </section>
-
-                <section className="loop-section">
-                  <div className="loop-head">
-                    <div>
-                      <span className="meta-label">Inner loop</span>
-                      <strong>IMU attitude stabilization</strong>
-                    </div>
-                    <p>
-                      These gains are faster and smaller. Use them to clean up attitude response
-                      once the hover point is already calm.
-                    </p>
-                  </div>
-                  <div className="pid-card-grid">
-                    {innerLoopCards.map((card) => (
-                      <PidAxisCard
-                        key={card.axis}
-                        tone="inner"
-                        axisLabel={card.axisLabel}
-                        title={card.title}
-                        description={card.description}
-                        pid={localControl.pid[card.axis] ?? DEFAULT_PID[card.axis]}
-                        step={card.step}
-                        liveLabel={card.liveLabel}
-                        liveValue={card.liveValue}
-                        liveDigits={card.liveDigits}
-                        targetLabel={card.targetLabel}
-                        targetValue={card.targetValue}
-                        targetDigits={card.targetDigits}
-                        errorLabel={card.errorLabel}
-                        errorValue={card.errorValue}
-                        errorDigits={card.errorDigits}
-                        unit={card.unit}
-                        note={card.note}
-                        onChange={(term, value) => updatePidValue(card.axis, term, value)}
-                      />
-                    ))}
-                  </div>
-                </section>
               </div>
-            </div>
-          </details>
-
-          <details className="panel disclosure-panel panel-payload">
-            <summary className="panel-summary">
-              <div>
-                <p className="panel-label">Advanced</p>
-                <h2>Serial payload and debug</h2>
-              </div>
-              <span className={`mini-badge ${payloadTone}`}>{payloadStatusLabel}</span>
-            </summary>
-
-            <div className="panel-body">
-              <div className="system-list compact">
-                <div>
-                  <span>Serial path</span>
-                  <strong>{system.serialForwarding ? 'Forwarding live' : system.canSendToEsp32 ? 'Ready' : 'Blocked'}</strong>
-                </div>
-                <div>
-                  <span>Last send</span>
-                  <strong>{system.lastSerialSendError || (system.lastSerialSendOk ? 'Successful' : 'Waiting')}</strong>
-                </div>
-              </div>
-
-              <pre>{debugPayloadText}</pre>
             </div>
           </details>
         </section>

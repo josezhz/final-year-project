@@ -3,6 +3,10 @@ frontend/dist/
 frontend/.vite/
 frontend/.vite-temp/
 
+backend/data_logs/*.csv
+backend/data_logs/*.html
+backend/calibration/calib_img/
+
 __pycache__/
 *.pyc
 *.pyo
