@@ -40,6 +40,7 @@ DATA_LOG_DIR = BASE_DIR / "data_logs"
 HOST = "localhost"
 PORT = 8765
 EXPECTED_CAMERAS = 2
+MAX_TRACKING_CAMERAS = 3
 MIN_BRIGHTNESS = 50
 MAX_LEDS = 3
 MAX_FIT_ERROR = 0.05
@@ -51,6 +52,10 @@ SERIAL_FRAME_TERMINATOR = b"\n"
 SERIAL_MAX_CONSECUTIVE_FAILURES = 3
 SERIAL_IMU_STALE_SECONDS = 0.5
 CAMERA_RETRY_SECONDS = 5.0
+SAFE_LANDING_TRACKING_LOSS_GRACE_SECONDS = 0.35
+SAFE_LANDING_DURATION_SECONDS = 5.0
+SAFE_LANDING_TARGET_THROTTLE = 0.50
+SAFE_LANDING_MIN_THROTTLE_DROP = 0.05
 DEFAULT_BAUD_RATE = 1000000
 DEFAULT_DRONE_INDEX = 0
 POSITION_JUMP_WEIGHT = 2.0
@@ -142,17 +147,21 @@ DEFAULT_TELEMETRY = {
     "model_fit_error_m": 0.0,
     "scale_factor": 1.0,
     "solved_led_coordinates": [],
-    "detected_leds_per_camera": [0, 0],
+    "detected_leds_per_camera": [0 for _ in range(MAX_TRACKING_CAMERAS)],
+    "active_camera_pair": [],
+    "pair_error": 0.0,
+    "tracking_status": "waiting",
+    "camera_pair_errors": [],
     "spatial_data_valid": False,
 }
 DEFAULT_VISION_METRICS = {
     "frames_processed": 0,
     "valid_pose_frames": 0,
     "all_markers_detected_frames": 0,
-    "per_camera_full_detection_frames": [0 for _ in range(EXPECTED_CAMERAS)],
+    "per_camera_full_detection_frames": [0 for _ in range(MAX_TRACKING_CAMERAS)],
     "pose_success_rate": 0.0,
     "full_marker_detection_rate": 0.0,
-    "per_camera_full_detection_rate": [0.0 for _ in range(EXPECTED_CAMERAS)],
+    "per_camera_full_detection_rate": [0.0 for _ in range(MAX_TRACKING_CAMERAS)],
     "avg_mapping_error_px": 0.0,
     "avg_model_fit_error_m": 0.0,
     "tracking_loop_hz": 0.0,
@@ -247,6 +256,11 @@ def coerce_float(value, default=0.0):
         return float(value)
     except (TypeError, ValueError):
         return float(default)
+
+
+def coerce_finite_float(value, default=0.0):
+    result = coerce_float(value, default)
+    return result if math.isfinite(result) else float(default)
 
 
 def coerce_int(value, default=0):
@@ -374,10 +388,15 @@ def build_vision_metrics_summary(
     tracking_loop_hz=0.0,
     mapping_error_sum=0.0,
     model_fit_error_sum=0.0,
+    camera_count=MAX_TRACKING_CAMERAS,
 ):
     frames_processed = max(0, coerce_int(frames_processed, 0))
     valid_pose_frames = max(0, coerce_int(valid_pose_frames, 0))
     all_markers_detected_frames = max(0, coerce_int(all_markers_detected_frames, 0))
+    camera_count = max(
+        EXPECTED_CAMERAS,
+        min(MAX_TRACKING_CAMERAS, coerce_int(camera_count, MAX_TRACKING_CAMERAS)),
+    )
     raw_per_camera = (
         per_camera_full_detection_frames
         if isinstance(per_camera_full_detection_frames, list)
@@ -388,7 +407,7 @@ def build_vision_metrics_summary(
             0,
             coerce_int(raw_per_camera[index] if index < len(raw_per_camera) else 0, 0),
         )
-        for index in range(EXPECTED_CAMERAS)
+        for index in range(camera_count)
     ]
 
     total_frames = max(1, frames_processed)
@@ -1039,7 +1058,6 @@ def find_best_clockwise_mapping(all_cam_leds, proj_mats, previous_led_points=Non
     best_points = None
 
     shift_ranges = [range(MAX_LEDS) for _ in all_cam_leds]
-    # 3 cameras x 3 LEDs -> 3^3 = 27 combinations.
     for shifts in np.ndindex(*[len(options) for options in shift_ranges]):
         mapped_leds = [
             cyclic_shift(cam_leds, shift)
@@ -1187,6 +1205,125 @@ def solve_pose(
     }
 
 
+def build_invalid_pose(
+    detected_led_counts,
+    tracking_status,
+    error=0.0,
+    mapping_error_px=0.0,
+    camera_pair_errors=None,
+):
+    return {
+        "position": {"x": 0.0, "y": 0.0, "z": 0.0},
+        "velocity": {"x": 0.0, "y": 0.0, "z": 0.0},
+        "rotation": {"yaw": 0.0, "pitch": 0.0, "roll": 0.0},
+        "error": round(coerce_finite_float(error, 0.0), 5),
+        "mapping_error_px": round(coerce_finite_float(mapping_error_px, 0.0), 5),
+        "model_fit_error_m": 0.0,
+        "scale_factor": 1.0,
+        "solved_led_coordinates": [],
+        "detected_leds_per_camera": list(detected_led_counts),
+        "active_camera_pair": [],
+        "pair_error": 0.0,
+        "tracking_status": tracking_status,
+        "camera_pair_errors": camera_pair_errors or [],
+        "spatial_data_valid": False,
+    }
+
+
+def solve_best_camera_pair_pose(
+    all_cam_leds,
+    proj_mats,
+    camera_indices,
+    previous_rotation=None,
+    previous_position=None,
+    previous_led_points=None,
+):
+    best_candidate = None
+    pair_results = []
+
+    for local_pair in itertools.combinations(range(len(all_cam_leds)), EXPECTED_CAMERAS):
+        pair_indices = [int(camera_indices[index]) for index in local_pair]
+        pair_leds = [all_cam_leds[index] for index in local_pair]
+        pair_result = {
+            "pair": pair_indices,
+            "valid": False,
+            "mapping_error_px": 0.0,
+            "model_fit_error_m": 0.0,
+            "reason": "",
+        }
+
+        if any(len(leds) != MAX_LEDS for leds in pair_leds):
+            pair_result["reason"] = "missing_markers"
+            pair_results.append(pair_result)
+            continue
+
+        pair_proj_mats = [proj_mats[index] for index in local_pair]
+        led_solution = solve_led_positions(
+            pair_leds,
+            pair_proj_mats,
+            previous_led_points=previous_led_points,
+        )
+        if led_solution is not None:
+            mapping_cost = coerce_finite_float(led_solution["mapping_cost"], 0.0)
+            pair_result["mapping_error_px"] = round(
+                mapping_cost,
+                5,
+            )
+
+        pose = solve_pose(
+            pair_leds,
+            pair_proj_mats,
+            previous_rotation=previous_rotation,
+            previous_position=previous_position,
+            precomputed_led_solution=led_solution,
+        )
+
+        if pose is None:
+            pair_result["reason"] = "pose_solve_failed"
+            pair_results.append(pair_result)
+            continue
+
+        pair_error = coerce_finite_float(
+            pose.get("mapping_error_px"),
+            pair_result["mapping_error_px"],
+        )
+        model_fit_error = coerce_finite_float(pose.get("model_fit_error_m"), 0.0)
+        pair_result.update(
+            {
+                "valid": True,
+                "mapping_error_px": round(pair_error, 5),
+                "model_fit_error_m": round(model_fit_error, 5),
+                "reason": "",
+            }
+        )
+        pair_results.append(pair_result)
+
+        score = (pair_error, model_fit_error)
+        if best_candidate is None or score < best_candidate["score"]:
+            best_candidate = {
+                "score": score,
+                "pose": pose,
+                "local_pair": [int(index) for index in local_pair],
+                "camera_pair": pair_indices,
+                "pair_error": pair_error,
+            }
+
+    if best_candidate is None:
+        return None, pair_results
+
+    pose = best_candidate["pose"]
+    pose["active_camera_pair"] = best_candidate["camera_pair"]
+    pose["active_camera_pair_local"] = best_candidate["local_pair"]
+    pose["pair_error"] = round(float(best_candidate["pair_error"]), 5)
+    pose["camera_pair_errors"] = pair_results
+    pose["tracking_status"] = (
+        "tracking_stereo_pair"
+        if len(all_cam_leds) == EXPECTED_CAMERAS
+        else "tracking_best_pair"
+    )
+    return pose, pair_results
+
+
 @dataclass
 class ControlState:
     active: bool = False
@@ -1300,8 +1437,10 @@ class ExperimentMetricsLogger:
                 "full_marker_detection_rate",
                 "cam1_full_detection_rate",
                 "cam2_full_detection_rate",
+                "cam3_full_detection_rate",
                 "cam1_leds",
                 "cam2_leds",
+                "cam3_leds",
                 "spatial_data_valid",
                 "mapping_error_px",
                 "model_fit_error_m",
@@ -1402,10 +1541,12 @@ class ExperimentMetricsLogger:
                 coerce_int(vision_metrics.get("valid_pose_frames"), 0),
                 f"{coerce_float(vision_metrics.get('pose_success_rate'), 0.0):.5f}",
                 f"{coerce_float(vision_metrics.get('full_marker_detection_rate'), 0.0):.5f}",
-                f"{coerce_float((vision_metrics.get('per_camera_full_detection_rate') or [0.0, 0.0])[0], 0.0):.5f}",
-                f"{coerce_float((vision_metrics.get('per_camera_full_detection_rate') or [0.0, 0.0])[1], 0.0):.5f}",
+                f"{coerce_float((vision_metrics.get('per_camera_full_detection_rate') or [0.0, 0.0, 0.0])[0], 0.0):.5f}",
+                f"{coerce_float((vision_metrics.get('per_camera_full_detection_rate') or [0.0, 0.0, 0.0])[1], 0.0):.5f}",
+                f"{coerce_float((vision_metrics.get('per_camera_full_detection_rate') or [0.0, 0.0, 0.0])[2], 0.0):.5f}",
                 coerce_int(detected_leds[0] if len(detected_leds) > 0 else 0, 0),
                 coerce_int(detected_leds[1] if len(detected_leds) > 1 else 0, 0),
+                coerce_int(detected_leds[2] if len(detected_leds) > 2 else 0, 0),
                 int(bool(telemetry.get("spatial_data_valid", False))),
                 f"{coerce_float(telemetry.get('mapping_error_px'), 0.0):.5f}",
                 f"{coerce_float(telemetry.get('model_fit_error_m'), 0.0):.5f}",
@@ -1717,6 +1858,8 @@ class MotionCaptureEngine:
         self.extrinsics = load_json(EXTRINSICS_PATH)
         self.camera = None
         self.camera_ids = []
+        self.active_camera_indices = []
+        self.active_camera_keys = []
         self.camera_error = ""
         self._next_camera_retry_at = 0.0
         self.proj_mats = []
@@ -1766,14 +1909,19 @@ class MotionCaptureEngine:
                 self.metrics["tracking_loop_hz"] = round(1.0 / dt_seconds, 2)
         self._last_frame_at = sample_time
 
+        active_camera_count = max(
+            EXPECTED_CAMERAS,
+            min(MAX_TRACKING_CAMERAS, len(detected_led_counts)),
+        )
         full_detection_flags = []
-        for index in range(EXPECTED_CAMERAS):
+        for index in range(MAX_TRACKING_CAMERAS):
             detected_count = coerce_int(
                 detected_led_counts[index] if index < len(detected_led_counts) else 0,
                 0,
             )
             has_full_detection = detected_count == MAX_LEDS
-            full_detection_flags.append(has_full_detection)
+            if index < active_camera_count:
+                full_detection_flags.append(has_full_detection)
             if has_full_detection:
                 self.metrics["per_camera_full_detection_frames"][index] += 1
 
@@ -1796,6 +1944,7 @@ class MotionCaptureEngine:
                 tracking_loop_hz=self.metrics["tracking_loop_hz"],
                 mapping_error_sum=self._mapping_error_sum,
                 model_fit_error_sum=self._model_fit_error_sum,
+                camera_count=MAX_TRACKING_CAMERAS,
             )
         )
 
@@ -1842,7 +1991,7 @@ class MotionCaptureEngine:
                         0,
                     ),
                 )
-                for index in range(EXPECTED_CAMERAS)
+                for index in range(MAX_TRACKING_CAMERAS)
             ],
             tracking_loop_hz=current_state.get("tracking_loop_hz", 0.0),
             mapping_error_sum=max(
@@ -1855,6 +2004,7 @@ class MotionCaptureEngine:
                 coerce_float(current_state.get("_model_fit_error_sum"), 0.0)
                 - coerce_float(baseline_state.get("_model_fit_error_sum"), 0.0),
             ),
+            camera_count=MAX_TRACKING_CAMERAS,
         )
 
     def ensure_camera(self):
@@ -1865,10 +2015,28 @@ class MotionCaptureEngine:
 
         try:
             camera = Camera(fps=60, resolution=Camera.RES_LARGE, colour=False)
-            self.camera_ids = list(camera.ids)
+            self.camera_ids = list(camera.ids)[:MAX_TRACKING_CAMERAS]
             if len(self.camera_ids) < EXPECTED_CAMERAS:
                 self.camera_error = (
                     f"Expected {EXPECTED_CAMERAS} cameras but found {len(self.camera_ids)}."
+                )
+                self._next_camera_retry_at = time.time() + CAMERA_RETRY_SECONDS
+                camera.end()
+                return False
+
+            calibrated_camera_indices = []
+            missing_calibration_keys = []
+            for index in range(len(self.camera_ids)):
+                cam_key = f"cam{index + 1}"
+                if cam_key in self.intrinsics and cam_key in self.extrinsics:
+                    calibrated_camera_indices.append(index)
+                else:
+                    missing_calibration_keys.append(cam_key)
+
+            if len(calibrated_camera_indices) < EXPECTED_CAMERAS:
+                self.camera_error = (
+                    "Need calibration for at least two connected cameras. "
+                    f"Missing: {', '.join(missing_calibration_keys) or 'unknown'}."
                 )
                 self._next_camera_retry_at = time.time() + CAMERA_RETRY_SECONDS
                 camera.end()
@@ -1881,8 +2049,12 @@ class MotionCaptureEngine:
             self.camera_matrices = []
             self.dist_coeffs = []
             self.camera_pose_summary = []
+            self.active_camera_indices = calibrated_camera_indices[:MAX_TRACKING_CAMERAS]
+            self.active_camera_keys = [
+                f"cam{index + 1}" for index in self.active_camera_indices
+            ]
             
-            for index in range(EXPECTED_CAMERAS):
+            for index in self.active_camera_indices:
                 cam_key = f"cam{index + 1}"
                 intrinsic = np.array(self.intrinsics[cam_key]["camera_matrix"], dtype=np.float32)
                 dist_coeff = np.array(self.intrinsics[cam_key]["dist_coeff"], dtype=np.float32)
@@ -1912,6 +2084,15 @@ class MotionCaptureEngine:
             print(f"  Front: {DRONE_LED_MODEL[0]}")
             print(f"  Back-Right: {DRONE_LED_MODEL[1]}")
             print(f"  Back-Left: {DRONE_LED_MODEL[2]}")
+            print(
+                "Tracking cameras: "
+                + ", ".join(self.active_camera_keys)
+                + (
+                    f" (unused missing calibration: {', '.join(missing_calibration_keys)})"
+                    if missing_calibration_keys
+                    else ""
+                )
+            )
             
             return True
         except Exception as exc:
@@ -1929,7 +2110,10 @@ class MotionCaptureEngine:
                 pass
         self.camera = None
         self.camera_ids = []
+        self.active_camera_indices = []
+        self.active_camera_keys = []
         self._next_camera_retry_at = 0.0
+        self.proj_mats = []
         self.camera_matrices = []
         self.dist_coeffs = []
         self.last_rotation = None
@@ -2004,13 +2188,21 @@ class MotionCaptureEngine:
         if isinstance(frames, np.ndarray):
             frames = [frames]
 
-        if len(frames) < EXPECTED_CAMERAS:
+        if len(self.active_camera_indices) < EXPECTED_CAMERAS:
+            self.camera_error = "Waiting for at least two calibrated cameras."
+            return None
+
+        missing_frame_indices = [
+            index for index in self.active_camera_indices if index >= len(frames)
+        ]
+        if missing_frame_indices:
             self.camera_error = (
-                f"Expected {EXPECTED_CAMERAS} frame streams but received {len(frames)}."
+                "Expected frame streams for cameras "
+                f"{missing_frame_indices} but received {len(frames)} streams."
             )
             return None
 
-        selected_frames = frames[:EXPECTED_CAMERAS]
+        selected_frames = [frames[index] for index in self.active_camera_indices]
         all_cam_leds = [detect_leds(frame.copy()) for frame in selected_frames]
         all_cam_leds_undistorted = [
             undistort_led_points(leds, camera_matrix, dist_coeff)
@@ -2030,7 +2222,7 @@ class MotionCaptureEngine:
         ):
             self.latest_preview_frames = [
                 {
-                    "camera": f"cam{index + 1}",
+                    "camera": self.active_camera_keys[index],
                     "image": encode_preview_frame(frame, leds),
                     "ledCount": len(leds),
                 }
@@ -2041,69 +2233,67 @@ class MotionCaptureEngine:
             for preview, leds in zip(self.latest_preview_frames, all_cam_leds):
                 preview["ledCount"] = len(leds)
         
-        # Check LED detection
-        if not all(len(leds) == MAX_LEDS for leds in all_cam_leds_undistorted):
-            self.camera_error = "Waiting for each camera to detect exactly three LEDs."
+        camera_indices = list(self.active_camera_indices)
+        full_detection_count = sum(
+            1 for leds in all_cam_leds_undistorted if len(leds) == MAX_LEDS
+        )
+
+        if full_detection_count < EXPECTED_CAMERAS:
+            self.camera_error = (
+                "Waiting for at least two cameras to detect exactly three LEDs."
+            )
             self.motion_state_filter.reset()
             self.record_frame_metrics(
                 detected_led_counts,
                 spatial_valid=False,
                 sample_time=now,
             )
-            return {
-                "position": {"x": 0.0, "y": 0.0, "z": 0.0},
-                "velocity": {"x": 0.0, "y": 0.0, "z": 0.0},
-                "rotation": {"yaw": 0.0, "pitch": 0.0, "roll": 0.0},
-                "error": 0.0,
-                "mapping_error_px": 0.0,
-                "model_fit_error_m": 0.0,
-                "scale_factor": 1.0,
-                "solved_led_coordinates": [],
-                "detected_leds_per_camera": detected_led_counts,
-                "spatial_data_valid": False,
-            }
+            _, pair_errors = solve_best_camera_pair_pose(
+                all_cam_leds_undistorted,
+                self.proj_mats,
+                camera_indices,
+                previous_rotation=self.last_rotation,
+                previous_position=self.last_translation,
+                previous_led_points=self.last_led_points,
+            )
+            return build_invalid_pose(
+                detected_led_counts,
+                "waiting_for_two_full_camera_detections",
+                camera_pair_errors=pair_errors,
+            )
 
-        led_solution = solve_led_positions(
+        pose, pair_errors = solve_best_camera_pair_pose(
             all_cam_leds_undistorted,
             self.proj_mats,
+            camera_indices,
+            previous_rotation=self.last_rotation,
+            previous_position=self.last_translation,
             previous_led_points=self.last_led_points,
-        )
-
-        # Solve pose
-        pose = solve_pose(
-            all_cam_leds_undistorted,
-            self.proj_mats,
-            self.last_rotation,
-            self.last_translation,
-            precomputed_led_solution=led_solution,
         )
         
         if pose is None:
             self.camera_error = "Pose solve failed or exceeded the fitting threshold."
             self.motion_state_filter.reset()
-            mapping_error_px = (
-                round(float(led_solution["mapping_cost"]), 5)
-                if led_solution is not None
-                else 0.0
-            )
+            valid_mapping_errors = [
+                coerce_finite_float(result.get("mapping_error_px"), 0.0)
+                for result in pair_errors
+                if coerce_finite_float(result.get("mapping_error_px"), 0.0) > 0.0
+            ]
+            mapping_error_px = min(valid_mapping_errors) if valid_mapping_errors else 0.0
+            error_value = mapping_error_px
             self.record_frame_metrics(
                 detected_led_counts,
                 spatial_valid=False,
                 mapping_error_px=mapping_error_px,
                 sample_time=now,
             )
-            return {
-                "position": {"x": 0.0, "y": 0.0, "z": 0.0},
-                "velocity": {"x": 0.0, "y": 0.0, "z": 0.0},
-                "rotation": {"yaw": 0.0, "pitch": 0.0, "roll": 0.0},
-                "error": mapping_error_px,
-                "mapping_error_px": mapping_error_px,
-                "model_fit_error_m": 0.0,
-                "scale_factor": 1.0,
-                "solved_led_coordinates": [],
-                "detected_leds_per_camera": detected_led_counts,
-                "spatial_data_valid": False,
-            }
+            return build_invalid_pose(
+                detected_led_counts,
+                "no_valid_camera_pair_pose",
+                error=error_value,
+                mapping_error_px=mapping_error_px,
+                camera_pair_errors=pair_errors,
+            )
 
         # Extract and filter
         raw_rotation = pose.pop("rotation_matrix")
@@ -2111,10 +2301,13 @@ class MotionCaptureEngine:
         mapping_shifts = pose.pop("mapping_shifts", None)
         semantic_permutation = pose.pop("semantic_permutation", None)
         semantic_led_points = pose.pop("semantic_led_points", None)
+        active_camera_pair_local = pose.pop("active_camera_pair_local", None)
         if mapping_shifts is None:
-            mapping_shifts = [0 for _ in all_cam_leds]
+            mapping_shifts = [0 for _ in range(EXPECTED_CAMERAS)]
         if semantic_permutation is None:
             semantic_permutation = list(range(MAX_LEDS))
+        if active_camera_pair_local is None:
+            active_camera_pair_local = list(range(min(EXPECTED_CAMERAS, len(all_cam_leds))))
         filtered_position, filtered_angles, filtered_velocity = self.filter_pose(
             translation,
             raw_rotation,
@@ -2123,24 +2316,32 @@ class MotionCaptureEngine:
         pose["position"] = filtered_position
         pose["velocity"] = filtered_velocity
         pose["rotation"] = filtered_angles
+        pose["detected_leds_per_camera"] = detected_led_counts
 
         # Relabel preview LEDs using solved semantic ordering: Front, Right, Left.
         semantic_labels = ["F", "R", "L"]
-        mapped_raw_leds = [
-            cyclic_shift(leds, int(shift))
-            for leds, shift in zip(all_cam_leds, mapping_shifts)
-        ]
-        semantic_raw_leds = [
-            [leds[index] for index in semantic_permutation]
-            for leds in mapped_raw_leds
-        ]
+        preview_leds = [list(leds) for leds in all_cam_leds]
+        preview_labels = [None for _ in all_cam_leds]
+        for pair_position, camera_index in enumerate(active_camera_pair_local):
+            if camera_index >= len(preview_leds) or pair_position >= len(mapping_shifts):
+                continue
+            if len(all_cam_leds[camera_index]) != MAX_LEDS:
+                continue
+            mapped_raw_leds = cyclic_shift(
+                all_cam_leds[camera_index],
+                int(mapping_shifts[pair_position]),
+            )
+            preview_leds[camera_index] = [
+                mapped_raw_leds[index] for index in semantic_permutation
+            ]
+            preview_labels[camera_index] = semantic_labels
         self.latest_preview_frames = [
             {
-                "camera": f"cam{index + 1}",
-                "image": encode_preview_frame(frame, leds, labels=semantic_labels),
+                "camera": self.active_camera_keys[index],
+                "image": encode_preview_frame(frame, leds, labels=preview_labels[index]),
                 "ledCount": len(leds),
             }
-            for index, (frame, leds) in enumerate(zip(selected_frames, semantic_raw_leds))
+            for index, (frame, leds) in enumerate(zip(selected_frames, preview_leds))
         ]
         self.last_preview_update = now
         
@@ -2186,6 +2387,10 @@ class ControlServer:
         self.imu_level_calibration_status = ""
         self.packet_counter_reset_sequence = 0
         self.session_packet_counter_reset_sequence = 0
+        self.safe_landing_tracking_lost_since = 0.0
+        self.safe_landing_requested = False
+        self.safe_landing_requested_at = 0.0
+        self.safe_landing_reason = ""
         self.latest_mocap_log_sample = self.build_mocap_log_sample()
         self.last_mocap_yaw_unwrapped = None
         self.last_mocap_yaw_timestamp = 0.0
@@ -2365,6 +2570,58 @@ class ControlServer:
         )
         return True
 
+    def get_safe_landing_target_throttle(self):
+        hover_throttle = coerce_float(
+            self.control.limits.get("hoverThrottle"),
+            CONTROL_LIMIT_DEFAULTS["hoverThrottle"],
+        )
+        target_throttle = min(
+            SAFE_LANDING_TARGET_THROTTLE,
+            hover_throttle - SAFE_LANDING_MIN_THROTTLE_DROP,
+        )
+        return max(0.0, min(target_throttle, 1.0))
+
+    def reset_safe_landing_state(self):
+        self.safe_landing_tracking_lost_since = 0.0
+        self.safe_landing_requested = False
+        self.safe_landing_requested_at = 0.0
+        self.safe_landing_reason = ""
+
+    def update_safe_landing_state(self, sample_time=None):
+        sample_time = float(sample_time or time.time())
+        tracking_valid = bool(self.telemetry.get("spatial_data_valid", False))
+        control_can_fly = self.control.active and self.control.armed
+
+        if not control_can_fly or tracking_valid:
+            self.reset_safe_landing_state()
+            return
+
+        if self.safe_landing_tracking_lost_since <= 0.0:
+            self.safe_landing_tracking_lost_since = sample_time
+            self.safe_landing_reason = "tracking_lost"
+
+        lost_seconds = sample_time - self.safe_landing_tracking_lost_since
+        if (
+            lost_seconds >= SAFE_LANDING_TRACKING_LOSS_GRACE_SECONDS
+            and not self.safe_landing_requested
+        ):
+            self.safe_landing_requested = True
+            self.safe_landing_requested_at = sample_time
+
+    def build_safe_landing_status(self):
+        now = time.time()
+        tracking_lost_for = 0.0
+        if self.safe_landing_tracking_lost_since > 0.0:
+            tracking_lost_for = max(0.0, now - self.safe_landing_tracking_lost_since)
+        return {
+            "requested": self.safe_landing_requested,
+            "trackingLostFor": round(tracking_lost_for, 3),
+            "graceSeconds": SAFE_LANDING_TRACKING_LOSS_GRACE_SECONDS,
+            "durationSeconds": SAFE_LANDING_DURATION_SECONDS,
+            "targetThrottle": round(self.get_safe_landing_target_throttle(), 3),
+            "reason": self.safe_landing_reason,
+        }
+
     def build_serial_payload(self):
         spatial_data_valid = self.telemetry["spatial_data_valid"]
         drone_index = DEFAULT_DRONE_INDEX
@@ -2372,6 +2629,8 @@ class ControlServer:
         velocity = self.telemetry.get("velocity", {})
         rotation = self.telemetry.get("rotation", {})
         imu_level_pending = self.is_imu_level_calibration_pending()
+        safe_landing_requested = self.safe_landing_requested and self.control.armed
+        safe_landing_throttle = self.get_safe_landing_target_throttle()
         self.serial_payload_sequence += 1
         payload_sequence = int(self.serial_payload_sequence)
 
@@ -2423,6 +2682,10 @@ class ControlServer:
                 payload["q"] = int(self.packet_counter_reset_sequence)
             if include_version:
                 payload["v"] = 2
+            if safe_landing_requested:
+                payload["fs"] = 1
+                payload["lt"] = compact_numeric(safe_landing_throttle, throttle_digits)
+                payload["ld"] = compact_numeric(SAFE_LANDING_DURATION_SECONDS, 1)
             if imu_level_pending:
                 payload["l"] = int(self.imu_level_calibration_sequence)
             return payload
@@ -2465,8 +2728,9 @@ class ControlServer:
 
     def build_snapshot(self):
         cameras_connected = len(self.mocap.camera_ids)
+        expected_cameras = max(EXPECTED_CAMERAS, len(self.mocap.active_camera_keys))
         cameras_ready = (
-            cameras_connected >= EXPECTED_CAMERAS
+            len(self.mocap.active_camera_keys) >= EXPECTED_CAMERAS
             and self.telemetry["spatial_data_valid"]
         )
         serial_ready = self.serial_bridge.is_connected()
@@ -2495,9 +2759,12 @@ class ControlServer:
             "telemetry": self.telemetry,
             "system": {
                 "frontendClients": len(self.clients),
-                "expectedCameras": EXPECTED_CAMERAS,
+                "expectedCameras": expected_cameras,
+                "minimumCameras": EXPECTED_CAMERAS,
+                "maxCameras": MAX_TRACKING_CAMERAS,
                 "connectedCameras": cameras_connected,
                 "cameraIds": self.mocap.camera_ids,
+                "activeCameraKeys": self.mocap.active_camera_keys,
                 "cameraPoses": self.mocap.camera_pose_summary,
                 "cameraPreviews": self.mocap.latest_preview_frames,
                 "camerasReady": cameras_ready,
@@ -2514,6 +2781,7 @@ class ControlServer:
                 "lastSerialPayload": self.last_serial_payload,
                 "lastSerialPayloadSeq": serial_payload_seq,
                 "lastSerialPayloadSizeBytes": self.last_serial_payload_size_bytes,
+                "safeLanding": self.build_safe_landing_status(),
                 "imuLevelCalibrationPending": self.is_imu_level_calibration_pending(),
                 "imuLevelCalibrationSent": self.imu_level_calibration_sent,
                 "imuLevelCalibrationSequence": self.imu_level_calibration_sequence,
@@ -2674,6 +2942,7 @@ class ControlServer:
                             self.serial_bridge.get_latest_imu(),
                         )
                         self.update_mocap_log_sample(self.telemetry, time.time())
+                    self.update_safe_landing_state(time.time())
                     imu_level_pending = self.is_imu_level_calibration_pending()
                     should_send_serial = (
                         (self.control.active and self.serial_bridge.is_connected())

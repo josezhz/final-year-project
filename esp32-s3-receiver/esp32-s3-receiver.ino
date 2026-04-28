@@ -23,6 +23,11 @@ constexpr unsigned long AUTO_ARM_THROTTLE_HOLD_MS = 1200;
 constexpr uint16_t AUTO_ARM_LOW_THROTTLE_RC = 1000;
 constexpr float AUTO_THROTTLE_RISE_SLEW_RC_PER_SECOND = 450.0f;
 constexpr float AUTO_THROTTLE_FALL_SLEW_RC_PER_SECOND = 700.0f;
+constexpr unsigned long SAFE_LANDING_TRIGGER_GRACE_MS = 350;
+constexpr unsigned long SAFE_LANDING_DEFAULT_DURATION_MS = 5000;
+constexpr unsigned long SAFE_LANDING_MIN_DURATION_MS = 1000;
+constexpr unsigned long SAFE_LANDING_MAX_DURATION_MS = 10000;
+constexpr float SAFE_LANDING_DEFAULT_THROTTLE = 0.50f;
 constexpr size_t MAX_PAYLOAD_LENGTH = 251;
 constexpr size_t MAX_SERIAL_FRAME_LENGTH = MAX_PAYLOAD_LENGTH - 1;
 constexpr size_t CRSF_MAX_FRAME_LENGTH = 64;
@@ -66,6 +71,9 @@ struct FlightCommand {
   float target[4];
   uint32_t sequence;
   uint32_t counterResetSequence;
+  bool failsafeLanding;
+  float landingThrottle;
+  unsigned long landingDurationMs;
   PidGains xyPos;
   PidGains zPos;
   PidGains yawPos;
@@ -126,6 +134,14 @@ bool manualArmThrottleHoldActive = false;
 unsigned long autoArmThrottleHoldStartedMs = 0;
 bool autoArmCommandLatched = false;
 bool autoArmThrottleHoldActive = false;
+bool trackingLossGraceActive = false;
+bool safeLandingActive = false;
+bool safeLandingCompleted = false;
+unsigned long trackingLossStartedMs = 0;
+unsigned long safeLandingStartedMs = 0;
+unsigned long safeLandingDurationMs = SAFE_LANDING_DEFAULT_DURATION_MS;
+uint16_t safeLandingStartThrottleRc = 1000;
+uint16_t safeLandingTargetThrottleRc = 1000;
 bool hasLastRxSequence = false;
 uint32_t rxPackets = 0;
 uint32_t rxMissingPackets = 0;
@@ -233,6 +249,9 @@ FlightCommand makeDefaultFlightCommand() {
   command.rotation[0] = 0.0f;
   command.rotation[1] = 0.0f;
   command.rotation[2] = 0.0f;
+  command.failsafeLanding = false;
+  command.landingThrottle = SAFE_LANDING_DEFAULT_THROTTLE;
+  command.landingDurationMs = SAFE_LANDING_DEFAULT_DURATION_MS;
   command.target[0] = 0.0f;
   command.target[1] = 0.0f;
   command.target[2] = 0.25f;
@@ -412,6 +431,16 @@ bool parseFloatValue(const char *json, const char *key, float &value) {
   return parseEnd != cursor;
 }
 
+unsigned long clampDurationMs(float durationSeconds) {
+  if (!isfinite(durationSeconds) || durationSeconds <= 0.0f) {
+    return SAFE_LANDING_DEFAULT_DURATION_MS;
+  }
+  const float durationMs = durationSeconds * 1000.0f;
+  return static_cast<unsigned long>(
+    clampf(durationMs, SAFE_LANDING_MIN_DURATION_MS, SAFE_LANDING_MAX_DURATION_MS)
+  );
+}
+
 bool parseBoolFlagEither(const char *json, const char *primaryKey, const char *fallbackKey, bool &value) {
   return parseBoolFlag(json, primaryKey, value) || parseBoolFlag(json, fallbackKey, value);
 }
@@ -471,9 +500,12 @@ bool parseFlightCommandPayload(const char *payload, FlightCommand &nextCommand) 
   FlightCommand parsed = flightCommand;
   float targetValues[4] = {};
   float limits[5] = {};
+  float landingThrottle = parsed.landingThrottle;
+  float landingDurationSeconds = static_cast<float>(parsed.landingDurationMs) / 1000.0f;
 
   parsed.sequence = 0;
   parsed.counterResetSequence = 0;
+  parsed.failsafeLanding = false;
 
   if (!parseBoolFlagEither(payload, "\"a\":", "\"arm\":", parsed.armed)) {
     return false;
@@ -510,6 +542,13 @@ bool parseFlightCommandPayload(const char *payload, FlightCommand &nextCommand) 
   parsed.maxThrottle = clampf(limits[2], parsed.hoverThrottle, 1.0f);
   parsed.maxTiltDeg = clampf(limits[3], 1.0f, 45.0f);
   parsed.maxYawRateDeg = clampf(limits[4], 1.0f, 360.0f);
+  parseBoolFlag(payload, "\"fs\":", parsed.failsafeLanding);
+  if (parseFloatValue(payload, "\"lt\":", landingThrottle)) {
+    parsed.landingThrottle = clampf(landingThrottle, 0.0f, 1.0f);
+  }
+  if (parseFloatValue(payload, "\"ld\":", landingDurationSeconds)) {
+    parsed.landingDurationMs = clampDurationMs(landingDurationSeconds);
+  }
   parseUnsignedValue(payload, "\"s\":", parsed.sequence);
   parseUnsignedValue(payload, "\"q\":", parsed.counterResetSequence);
 
@@ -917,6 +956,94 @@ void sendSafeDisarmedFrame() {
   sendCRSF(lastRcRoll, lastRcPitch, lastRcThrottle, lastRcYaw, lastRcArm);
 }
 
+void resetTrackingLossGrace() {
+  trackingLossGraceActive = false;
+  trackingLossStartedMs = 0;
+}
+
+void resetSafeLandingState() {
+  resetTrackingLossGrace();
+  safeLandingActive = false;
+  safeLandingCompleted = false;
+  safeLandingStartedMs = 0;
+  safeLandingDurationMs = SAFE_LANDING_DEFAULT_DURATION_MS;
+  safeLandingStartThrottleRc = 1000;
+  safeLandingTargetThrottleRc = 1000;
+}
+
+void beginSafeLanding(unsigned long nowMs) {
+  resetTrackingLossGrace();
+  if (safeLandingActive || safeLandingCompleted) {
+    return;
+  }
+
+  if (lastRcArm < 1500) {
+    safeLandingCompleted = true;
+    sendSafeDisarmedFrame();
+    return;
+  }
+
+  const float currentThrottle = rcToUnitInterval(lastRcThrottle);
+  const float landingThrottle = min(
+    clampf(flightCommand.landingThrottle, 0.0f, 1.0f),
+    currentThrottle
+  );
+  safeLandingActive = true;
+  safeLandingCompleted = false;
+  safeLandingStartedMs = nowMs;
+  safeLandingDurationMs = constrain(
+    flightCommand.landingDurationMs,
+    SAFE_LANDING_MIN_DURATION_MS,
+    SAFE_LANDING_MAX_DURATION_MS
+  );
+  safeLandingStartThrottleRc = lastRcThrottle;
+  safeLandingTargetThrottleRc = throttleToRc(landingThrottle);
+}
+
+bool runSafeLandingToFlightController(unsigned long nowMs) {
+  if (!safeLandingActive) {
+    return false;
+  }
+
+  const unsigned long elapsedMs = nowMs - safeLandingStartedMs;
+  if (elapsedMs >= safeLandingDurationMs) {
+    safeLandingActive = false;
+    safeLandingCompleted = true;
+    sendSafeDisarmedFrame();
+    return true;
+  }
+
+  const float progress = clampf(
+    static_cast<float>(elapsedMs) / static_cast<float>(safeLandingDurationMs),
+    0.0f,
+    1.0f
+  );
+  const float throttleRc = static_cast<float>(safeLandingStartThrottleRc)
+    + ((static_cast<float>(safeLandingTargetThrottleRc) - static_cast<float>(safeLandingStartThrottleRc)) * progress);
+
+  lastRcRoll = 1500;
+  lastRcPitch = 1500;
+  lastRcThrottle = static_cast<uint16_t>(clampf(roundf(throttleRc), 1000.0f, 2000.0f));
+  lastRcYaw = 1500;
+  lastRcArm = 2000;
+  lastDesiredWorldXVelocity = 0.0f;
+  lastDesiredWorldYVelocity = 0.0f;
+  lastDesiredWorldZVelocity = 0.0f;
+  lastDesiredYawRate = 0.0f;
+  lastDesiredRollDeg = 0.0f;
+  lastDesiredPitchDeg = 0.0f;
+  sendCRSF(lastRcRoll, lastRcPitch, lastRcThrottle, lastRcYaw, lastRcArm);
+  return true;
+}
+
+void holdLastArmedControlFrame() {
+  if (lastRcArm < 1500) {
+    sendSafeDisarmedFrame();
+    return;
+  }
+  sendCRSF(lastRcRoll, lastRcPitch, lastRcThrottle, lastRcYaw, lastRcArm);
+}
+
 void resetControllerPacketMetrics(uint32_t handledSequence) {
   rxPackets = 0;
   rxMissingPackets = 0;
@@ -1043,6 +1170,7 @@ bool runManualControlToFlightController() {
     return false;
   }
 
+  resetSafeLandingState();
   resetAutoArmAssist();
   resetAllPidStates();
 
@@ -1101,16 +1229,64 @@ void runOuterLoopToFlightController(float dtSeconds) {
     return;
   }
 
-  const bool commandFresh = (millis() - lastCommandRxMs) <= COMMAND_TIMEOUT_MS;
+  const unsigned long nowMs = millis();
+  const bool commandFresh = (nowMs - lastCommandRxMs) <= COMMAND_TIMEOUT_MS;
   const bool controlReady = commandFresh && flightCommand.armed && flightCommand.spatialValid;
-  lastControlHz = controlReady && dtSeconds > 0.0f ? (1.0f / dtSeconds) : 0.0f;
+  lastControlHz = (controlReady || safeLandingActive) && dtSeconds > 0.0f ? (1.0f / dtSeconds) : 0.0f;
 
-  if (!controlReady) {
+  if (controlReady) {
+    resetSafeLandingState();
+  } else if (commandFresh && !flightCommand.armed) {
+    resetSafeLandingState();
     resetAutoArmAssist();
     resetAllPidStates();
     sendSafeDisarmedFrame();
     return;
   }
+
+  if (!controlReady && !safeLandingActive) {
+    const bool explicitSafeLanding = commandFresh && flightCommand.armed && flightCommand.failsafeLanding;
+    const bool staleArmedCommand = !commandFresh && flightCommand.armed && lastRcArm >= 1500;
+    const bool invalidArmedCommand = commandFresh && flightCommand.armed && !flightCommand.spatialValid;
+    if (explicitSafeLanding || staleArmedCommand || invalidArmedCommand) {
+      resetAutoArmAssist();
+      resetAllPidStates();
+      if (explicitSafeLanding || staleArmedCommand) {
+        beginSafeLanding(nowMs);
+      } else if (!trackingLossGraceActive) {
+        trackingLossGraceActive = true;
+        trackingLossStartedMs = nowMs;
+      } else if ((nowMs - trackingLossStartedMs) >= SAFE_LANDING_TRIGGER_GRACE_MS) {
+        beginSafeLanding(nowMs);
+      }
+
+      if (runSafeLandingToFlightController(nowMs)) {
+        return;
+      }
+      holdLastArmedControlFrame();
+      return;
+    }
+  }
+
+  if (safeLandingActive || safeLandingCompleted) {
+    resetAutoArmAssist();
+    resetAllPidStates();
+    if (runSafeLandingToFlightController(nowMs)) {
+      return;
+    }
+    sendSafeDisarmedFrame();
+    return;
+  }
+
+  if (!controlReady) {
+    resetSafeLandingState();
+    resetAutoArmAssist();
+    resetAllPidStates();
+    sendSafeDisarmedFrame();
+    return;
+  }
+
+  resetSafeLandingState();
 
   if (!autoArmCommandLatched) {
     autoArmCommandLatched = true;
@@ -1253,10 +1429,16 @@ void printStatus() {
     } else {
       mode = "manual";
     }
+  } else if (safeLandingActive) {
+    mode = "safe_landing";
+  } else if (safeLandingCompleted) {
+    mode = "safe_landed";
   } else if (autoFresh && flightCommand.armed && flightCommand.spatialValid && autoArmThrottleHoldActive) {
     mode = "outer_arm_hold";
   } else if (autoFresh && flightCommand.armed && flightCommand.spatialValid) {
     mode = "outer";
+  } else if (autoFresh && flightCommand.armed && flightCommand.failsafeLanding) {
+    mode = "safe_landing_requested";
   } else if (autoFresh && !flightCommand.armed) {
     mode = "auto_disarmed";
   } else if (autoFresh && !flightCommand.spatialValid) {
