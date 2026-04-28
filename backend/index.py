@@ -51,6 +51,7 @@ SERIAL_SETTLE_SECONDS = 2.0
 SERIAL_FRAME_TERMINATOR = b"\n"
 SERIAL_MAX_CONSECUTIVE_FAILURES = 3
 SERIAL_IMU_STALE_SECONDS = 0.5
+SERIAL_BATTERY_STALE_SECONDS = 2.0
 CAMERA_RETRY_SECONDS = 5.0
 SAFE_LANDING_TRACKING_LOSS_GRACE_SECONDS = 0.35
 SAFE_LANDING_DURATION_SECONDS = 5.0
@@ -70,11 +71,11 @@ MOTION_STATE_MAX_DT = 0.25
 MOTION_STATE_MAX_ABS_VELOCITY = 2.5
 
 CONTROL_PID_DEFAULTS = {
-    "xyPos": {"kp": 1.25, "ki": 0.0, "kd": 0.0},
-    "zPos": {"kp": 1.5, "ki": 0.0, "kd": 0.0},
+    "xyPos": {"kp": 10.0, "ki": 0.25, "kd": 0.0},
+    "zPos": {"kp": 1.2, "ki": 0.0, "kd": 0.0},
     "yawPos": {"kp": 1.2, "ki": 0.0, "kd": 0.0},
-    "xyVel": {"kp": 1.15, "ki": 0.0, "kd": 0.0},
-    "zVel": {"kp": 1.35, "ki": 0.06, "kd": 0.0},
+    "xyVel": {"kp": 0.9, "ki": 0.0, "kd": 0.0},
+    "zVel": {"kp": 0.85, "ki": 0.04, "kd": 0.0},
     "roll": {"kp": 0.008, "ki": 0.0, "kd": 0.0006},
     "pitch": {"kp": 0.008, "ki": 0.0, "kd": 0.0006},
     "yawRate": {"kp": 0.006, "ki": 0.0, "kd": 0.0},
@@ -109,13 +110,23 @@ CONTROL_LOG_COLUMNS = [
 ]
 # Mocap/body frame is +x front, +y left, +z up. A yaw target of 0 deg means
 # the drone's nose should stay aligned with the world +x direction.
-CONTROL_TARGET_DEFAULTS = {"x": 0.0, "y": 0.0, "z": 0.3, "yaw": 0.0}
+CONTROL_TARGET_DEFAULTS = {"x": 0.0, "y": 0.0, "z": 0.35, "yaw": -90.0}
 CONTROL_LIMIT_DEFAULTS = {
-    "hoverThrottle": 0.83,
+    "hoverThrottle": 0.76,
     "minThrottle": 0.42,
     "maxThrottle": 1.00,
     "maxTiltDeg": 8.0,
     "maxYawRateDeg": 180.0,
+}
+BATTERY_HOVER_COMPENSATION_DEFAULTS = {
+    "enabled": False,
+    "nominalVoltage": 3.8,
+    "gain": 0.14,
+    "maxCorrection": 0.08,
+    "minHoverThrottle": 0.68,
+    "maxHoverThrottle": 0.90,
+    "filterTimeConstant": 2.0,
+    "rateLimitPerSecond": 0.02,
 }
 
 
@@ -136,12 +147,29 @@ DEFAULT_IMU_TELEMETRY = {
     "pitch_rate": 0.0,
     "roll_rate": 0.0,
 }
+DEFAULT_BATTERY_TELEMETRY = {
+    "ready": False,
+    "voltage": 0.0,
+    "cell_voltage": 0.0,
+    "current": 0.0,
+    "capacity_mah": 0,
+    "remaining_percent": -1,
+}
 
 DEFAULT_TELEMETRY = {
     "position": {"x": 0.0, "y": 0.0, "z": 0.0},
     "velocity": {"x": 0.0, "y": 0.0, "z": 0.0},
     "rotation": {"yaw": 0.0, "pitch": 0.0, "roll": 0.0},
     "imu": DEFAULT_IMU_TELEMETRY,
+    "battery": DEFAULT_BATTERY_TELEMETRY,
+    "battery_hover_compensation": {
+        "enabled": False,
+        "status": "disabled",
+        "baseHoverThrottle": CONTROL_LIMIT_DEFAULTS["hoverThrottle"],
+        "adjustedHoverThrottle": CONTROL_LIMIT_DEFAULTS["hoverThrottle"],
+        "correction": 0.0,
+        "filteredVoltage": 0.0,
+    },
     "error": 0.0,
     "mapping_error_px": 0.0,
     "model_fit_error_m": 0.0,
@@ -207,6 +235,18 @@ IMU_LOG_COLUMNS = [
     "mocap_yaw_error_deg",
     "mocap_yaw_rate_deg_s",
 ]
+BATTERY_LOG_COLUMNS = [
+    "battery_ready",
+    "battery_voltage_v",
+    "battery_cell_voltage_v",
+    "battery_current_a",
+    "battery_capacity_mah",
+    "battery_remaining_percent",
+    "battery_hover_comp_enabled",
+    "battery_hover_filtered_voltage_v",
+    "battery_hover_adjusted_throttle",
+    "battery_hover_correction",
+]
 PREVIEW_WIDTH = 240
 PREVIEW_JPEG_QUALITY = 45
 MAX_LED_REORDER_COST_PIXELS = 75
@@ -216,6 +256,10 @@ SEMANTIC_ROTATION_TEMPORAL_WEIGHT = 1e-4
 
 def default_imu_telemetry():
     return copy.deepcopy(DEFAULT_IMU_TELEMETRY)
+
+
+def default_battery_telemetry():
+    return copy.deepcopy(DEFAULT_BATTERY_TELEMETRY)
 
 
 def default_telemetry():
@@ -249,6 +293,13 @@ def default_limit_config():
     return {axis: float(value) for axis, value in CONTROL_LIMIT_DEFAULTS.items()}
 
 
+def default_battery_hover_compensation_config():
+    return {
+        field: bool(value) if field == "enabled" else float(value)
+        for field, value in BATTERY_HOVER_COMPENSATION_DEFAULTS.items()
+    }
+
+
 def coerce_float(value, default=0.0):
     try:
         if value is None:
@@ -280,6 +331,36 @@ def sanitize_imu_telemetry(payload):
         "roll": round(coerce_float(payload.get("roll"), 0.0), 2),
         "pitch_rate": round(coerce_float(payload.get("pitch_rate"), 0.0), 2),
         "roll_rate": round(coerce_float(payload.get("roll_rate"), 0.0), 2),
+    }
+
+
+def sanitize_battery_telemetry(payload):
+    payload = payload if isinstance(payload, dict) else {}
+    voltage = coerce_finite_float(payload.get("voltage", payload.get("bv")), 0.0)
+    cell_voltage = coerce_finite_float(
+        payload.get("cell_voltage", payload.get("bc", voltage)),
+        voltage,
+    )
+    voltage_valid = 0.0 < voltage <= 6.0
+    percent = coerce_int(
+        payload.get("remaining_percent", payload.get("pct")),
+        -1,
+    )
+    if percent < 0 or percent > 100:
+        percent = -1
+    return {
+        "ready": bool(payload.get("ready", payload.get("ok", False))) and voltage_valid,
+        "voltage": round(voltage if voltage_valid else 0.0, 3),
+        "cell_voltage": round(cell_voltage if 0.0 < cell_voltage <= 6.0 else 0.0, 3),
+        "current": round(
+            coerce_finite_float(payload.get("current", payload.get("ba")), 0.0),
+            3,
+        ),
+        "capacity_mah": max(
+            0,
+            coerce_int(payload.get("capacity_mah", payload.get("mah")), 0),
+        ),
+        "remaining_percent": percent,
     }
 
 
@@ -351,11 +432,12 @@ def sanitize_controller_metrics(payload):
     }
 
 
-def merge_telemetry(base_telemetry=None, imu_telemetry=None):
+def merge_telemetry(base_telemetry=None, imu_telemetry=None, battery_telemetry=None):
     merged = default_telemetry()
     if isinstance(base_telemetry, dict):
         merged.update(copy.deepcopy(base_telemetry))
     merged["imu"] = sanitize_imu_telemetry(imu_telemetry)
+    merged["battery"] = sanitize_battery_telemetry(battery_telemetry)
     return merged
 
 
@@ -377,6 +459,25 @@ def build_imu_log_values(sample=None, mocap_sample=None):
         f"{coerce_float(mocap_sample.get('vz'), 0.0):.4f}",
         f"{coerce_float(mocap_sample.get('yaw_error'), 0.0):.2f}",
         f"{coerce_float(mocap_sample.get('yaw_rate'), 0.0):.2f}",
+    ]
+
+
+def build_battery_log_values(sample=None, compensation_status=None):
+    sample = sanitize_battery_telemetry(sample)
+    compensation_status = (
+        compensation_status if isinstance(compensation_status, dict) else {}
+    )
+    return [
+        int(bool(sample.get("ready", False))),
+        f"{coerce_float(sample.get('voltage'), 0.0):.3f}",
+        f"{coerce_float(sample.get('cell_voltage'), 0.0):.3f}",
+        f"{coerce_float(sample.get('current'), 0.0):.3f}",
+        coerce_int(sample.get("capacity_mah"), 0),
+        coerce_int(sample.get("remaining_percent"), -1),
+        int(bool(compensation_status.get("enabled", False))),
+        f"{coerce_float(compensation_status.get('filteredVoltage'), 0.0):.3f}",
+        f"{coerce_float(compensation_status.get('adjustedHoverThrottle'), 0.0):.4f}",
+        f"{coerce_float(compensation_status.get('correction'), 0.0):.4f}",
     ]
 
 
@@ -554,6 +655,53 @@ def sanitize_limit_config(payload):
     )
     sanitized["maxTiltDeg"] = max(1.0, sanitized["maxTiltDeg"])
     sanitized["maxYawRateDeg"] = max(1.0, sanitized["maxYawRateDeg"])
+    return sanitized
+
+
+def sanitize_battery_hover_compensation_config(payload):
+    payload = payload if isinstance(payload, dict) else {}
+    defaults = BATTERY_HOVER_COMPENSATION_DEFAULTS
+    sanitized = {
+        "enabled": bool(payload.get("enabled", defaults["enabled"])),
+        "nominalVoltage": coerce_float(
+            payload.get("nominalVoltage"),
+            defaults["nominalVoltage"],
+        ),
+        "gain": coerce_float(payload.get("gain"), defaults["gain"]),
+        "maxCorrection": coerce_float(
+            payload.get("maxCorrection"),
+            defaults["maxCorrection"],
+        ),
+        "minHoverThrottle": coerce_float(
+            payload.get("minHoverThrottle"),
+            defaults["minHoverThrottle"],
+        ),
+        "maxHoverThrottle": coerce_float(
+            payload.get("maxHoverThrottle"),
+            defaults["maxHoverThrottle"],
+        ),
+        "filterTimeConstant": coerce_float(
+            payload.get("filterTimeConstant"),
+            defaults["filterTimeConstant"],
+        ),
+        "rateLimitPerSecond": coerce_float(
+            payload.get("rateLimitPerSecond"),
+            defaults["rateLimitPerSecond"],
+        ),
+    }
+    sanitized["nominalVoltage"] = max(3.0, min(sanitized["nominalVoltage"], 4.3))
+    sanitized["gain"] = max(0.0, min(sanitized["gain"], 0.3))
+    sanitized["maxCorrection"] = max(0.0, min(sanitized["maxCorrection"], 0.15))
+    sanitized["minHoverThrottle"] = max(0.0, min(sanitized["minHoverThrottle"], 1.0))
+    sanitized["maxHoverThrottle"] = max(
+        sanitized["minHoverThrottle"],
+        min(sanitized["maxHoverThrottle"], 1.0),
+    )
+    sanitized["filterTimeConstant"] = max(0.25, min(sanitized["filterTimeConstant"], 10.0))
+    sanitized["rateLimitPerSecond"] = max(
+        0.001,
+        min(sanitized["rateLimitPerSecond"], 0.2),
+    )
     return sanitized
 
 
@@ -1333,6 +1481,9 @@ class ControlState:
     target: dict = field(default_factory=default_target_config)
     limits: dict = field(default_factory=default_limit_config)
     pid: dict = field(default_factory=default_pid_config)
+    battery_hover_compensation: dict = field(
+        default_factory=default_battery_hover_compensation_config
+    )
 
 
 class ImuDataLogger:
@@ -1429,6 +1580,7 @@ class ExperimentMetricsLogger:
                 "iso_time",
                 "elapsed_s",
                 *IMU_LOG_COLUMNS,
+                *BATTERY_LOG_COLUMNS,
                 "backend_loop_hz",
                 "tracking_loop_hz",
                 "frames_processed",
@@ -1526,6 +1678,10 @@ class ExperimentMetricsLogger:
         detected_leds = telemetry.get("detected_leds_per_camera", [])
         motor_outputs = controller_metrics.get("motor_outputs", [0.0, 0.0, 0.0, 0.0])
         imu_values = build_imu_log_values(imu_sample, mocap_sample)
+        battery_values = build_battery_log_values(
+            telemetry.get("battery", {}),
+            telemetry.get("battery_hover_compensation", {}),
+        )
         control_values = build_control_log_values(control_state)
         timestamp = datetime.fromtimestamp(sample_time).isoformat(timespec="milliseconds")
         elapsed = max(0.0, float(sample_time) - self.started_at)
@@ -1535,6 +1691,7 @@ class ExperimentMetricsLogger:
                 timestamp,
                 f"{elapsed:.3f}",
                 *imu_values,
+                *battery_values,
                 f"{coerce_float(backend_loop_hz, 0.0):.2f}",
                 f"{coerce_float(vision_metrics.get('tracking_loop_hz'), 0.0):.2f}",
                 coerce_int(vision_metrics.get("frames_processed"), 0),
@@ -1624,9 +1781,11 @@ class SerialBridge:
         self._consecutive_send_failures = 0
         self._serial_buffer = bytearray()
         self.latest_imu = default_imu_telemetry()
+        self.latest_battery = default_battery_telemetry()
         self.latest_bridge_metrics = default_bridge_metrics()
         self.latest_controller_metrics = default_controller_metrics()
         self._last_imu_received_at = 0.0
+        self._last_battery_received_at = 0.0
         self.imu_sample_callback = None
 
     def refresh_ports(self, force=False):
@@ -1682,9 +1841,11 @@ class SerialBridge:
             self._consecutive_send_failures = 0
             self._serial_buffer = bytearray()
             self.latest_imu = default_imu_telemetry()
+            self.latest_battery = default_battery_telemetry()
             self.latest_bridge_metrics = default_bridge_metrics()
             self.latest_controller_metrics = default_controller_metrics()
             self._last_imu_received_at = 0.0
+            self._last_battery_received_at = 0.0
             self.last_error = ""
             return True
         except Exception as exc:
@@ -1694,9 +1855,11 @@ class SerialBridge:
             self._consecutive_send_failures = 0
             self._serial_buffer = bytearray()
             self.latest_imu = default_imu_telemetry()
+            self.latest_battery = default_battery_telemetry()
             self.latest_bridge_metrics = default_bridge_metrics()
             self.latest_controller_metrics = default_controller_metrics()
             self._last_imu_received_at = 0.0
+            self._last_battery_received_at = 0.0
             self.last_error = f"Serial connection failed: {exc}"
             return False
 
@@ -1724,9 +1887,11 @@ class SerialBridge:
         self._consecutive_send_failures = 0
         self._serial_buffer = bytearray()
         self.latest_imu = default_imu_telemetry()
+        self.latest_battery = default_battery_telemetry()
         self.latest_bridge_metrics = default_bridge_metrics()
         self.latest_controller_metrics = default_controller_metrics()
         self._last_imu_received_at = 0.0
+        self._last_battery_received_at = 0.0
 
     def is_connected(self):
         return bool(self.connection and self.connection.is_open)
@@ -1756,6 +1921,29 @@ class SerialBridge:
                 self.imu_sample_callback(
                     copy.deepcopy(self.latest_imu), self._last_imu_received_at
                 )
+            return
+
+        if payload_type in ("bat", "battery"):
+            self.latest_battery = sanitize_battery_telemetry(
+                {
+                    "ready": payload.get("ready", payload.get("ok", False)),
+                    "voltage": payload.get("voltage", payload.get("bv", 0.0)),
+                    "cell_voltage": payload.get(
+                        "cell_voltage",
+                        payload.get("bc", payload.get("bv", 0.0)),
+                    ),
+                    "current": payload.get("current", payload.get("ba", 0.0)),
+                    "capacity_mah": payload.get(
+                        "capacity_mah",
+                        payload.get("mah", 0),
+                    ),
+                    "remaining_percent": payload.get(
+                        "remaining_percent",
+                        payload.get("pct", -1),
+                    ),
+                }
+            )
+            self._last_battery_received_at = time.time()
             return
 
         if payload_type == "bridge":
@@ -1803,6 +1991,16 @@ class SerialBridge:
         ):
             return default_imu_telemetry()
         return copy.deepcopy(self.latest_imu)
+
+    def get_latest_battery(self):
+        if (
+            not self.is_connected()
+            or self._last_battery_received_at <= 0.0
+            or (time.time() - self._last_battery_received_at)
+            > SERIAL_BATTERY_STALE_SECONDS
+        ):
+            return default_battery_telemetry()
+        return copy.deepcopy(self.latest_battery)
 
     def send(self, drone_index, payload):
         if not self.is_connected():
@@ -2391,6 +2589,11 @@ class ControlServer:
         self.safe_landing_requested = False
         self.safe_landing_requested_at = 0.0
         self.safe_landing_reason = ""
+        self.battery_hover_filtered_voltage = 0.0
+        self.battery_hover_adjusted_throttle = self.control.limits["hoverThrottle"]
+        self.battery_hover_correction = 0.0
+        self.battery_hover_status = "disabled"
+        self.battery_hover_last_update = 0.0
         self.latest_mocap_log_sample = self.build_mocap_log_sample()
         self.last_mocap_yaw_unwrapped = None
         self.last_mocap_yaw_timestamp = 0.0
@@ -2581,6 +2784,121 @@ class ControlServer:
         )
         return max(0.0, min(target_throttle, 1.0))
 
+    def get_battery_hover_compensation_config(self):
+        return sanitize_battery_hover_compensation_config(
+            self.control.battery_hover_compensation
+        )
+
+    def update_battery_hover_compensation(self, sample_time=None):
+        sample_time = float(sample_time or time.time())
+        limits = sanitize_limit_config(self.control.limits)
+        base_hover = limits["hoverThrottle"]
+        config = self.get_battery_hover_compensation_config()
+        battery = self.serial_bridge.get_latest_battery()
+
+        if not config["enabled"]:
+            self.battery_hover_filtered_voltage = 0.0
+            self.battery_hover_adjusted_throttle = base_hover
+            self.battery_hover_correction = 0.0
+            self.battery_hover_status = "disabled"
+            self.battery_hover_last_update = sample_time
+            return
+
+        if not battery.get("ready", False):
+            self.battery_hover_adjusted_throttle = base_hover
+            self.battery_hover_correction = 0.0
+            self.battery_hover_status = "battery_unavailable"
+            self.battery_hover_last_update = sample_time
+            return
+
+        voltage = coerce_finite_float(battery.get("cell_voltage"), 0.0)
+        if voltage <= 0.0:
+            voltage = coerce_finite_float(battery.get("voltage"), 0.0)
+        if not 0.0 < voltage <= 6.0:
+            self.battery_hover_adjusted_throttle = base_hover
+            self.battery_hover_correction = 0.0
+            self.battery_hover_status = "battery_invalid"
+            self.battery_hover_last_update = sample_time
+            return
+
+        dt = (
+            max(0.0, sample_time - self.battery_hover_last_update)
+            if self.battery_hover_last_update > 0.0
+            else 0.0
+        )
+        if self.battery_hover_filtered_voltage <= 0.0 or dt <= 0.0:
+            self.battery_hover_filtered_voltage = voltage
+        else:
+            alpha = min(1.0, dt / config["filterTimeConstant"])
+            self.battery_hover_filtered_voltage += (
+                (voltage - self.battery_hover_filtered_voltage) * alpha
+            )
+
+        raw_correction = config["gain"] * (
+            config["nominalVoltage"] - self.battery_hover_filtered_voltage
+        )
+        target_correction = max(
+            -config["maxCorrection"],
+            min(raw_correction, config["maxCorrection"]),
+        )
+        min_hover = max(
+            limits["minThrottle"],
+            min(config["minHoverThrottle"], limits["maxThrottle"]),
+        )
+        max_hover = max(
+            min_hover,
+            min(limits["maxThrottle"], config["maxHoverThrottle"]),
+        )
+        target_hover = max(
+            min_hover,
+            min(base_hover + target_correction, max_hover),
+        )
+
+        previous_hover = self.battery_hover_adjusted_throttle or base_hover
+        max_delta = config["rateLimitPerSecond"] * dt
+        if max_delta <= 0.0:
+            adjusted_hover = previous_hover
+        else:
+            adjusted_hover = previous_hover + max(
+                -max_delta,
+                min(target_hover - previous_hover, max_delta),
+            )
+
+        self.battery_hover_adjusted_throttle = max(
+            min_hover,
+            min(adjusted_hover, max_hover),
+        )
+        self.battery_hover_correction = self.battery_hover_adjusted_throttle - base_hover
+        self.battery_hover_status = "active"
+        self.battery_hover_last_update = sample_time
+
+    def get_effective_hover_throttle(self):
+        return max(
+            0.0,
+            min(
+                coerce_float(
+                    self.battery_hover_adjusted_throttle,
+                    self.control.limits["hoverThrottle"],
+                ),
+                1.0,
+            ),
+        )
+
+    def build_battery_hover_compensation_status(self):
+        config = self.get_battery_hover_compensation_config()
+        return {
+            "enabled": bool(config["enabled"]),
+            "status": self.battery_hover_status,
+            "baseHoverThrottle": round(
+                coerce_float(self.control.limits.get("hoverThrottle"), 0.0),
+                4,
+            ),
+            "adjustedHoverThrottle": round(self.get_effective_hover_throttle(), 4),
+            "correction": round(self.battery_hover_correction, 4),
+            "filteredVoltage": round(self.battery_hover_filtered_voltage, 3),
+            "config": config,
+        }
+
     def reset_safe_landing_state(self):
         self.safe_landing_tracking_lost_since = 0.0
         self.safe_landing_requested = False
@@ -2631,6 +2949,7 @@ class ControlServer:
         imu_level_pending = self.is_imu_level_calibration_pending()
         safe_landing_requested = self.safe_landing_requested and self.control.armed
         safe_landing_throttle = self.get_safe_landing_target_throttle()
+        effective_hover_throttle = self.get_effective_hover_throttle()
         self.serial_payload_sequence += 1
         payload_sequence = int(self.serial_payload_sequence)
 
@@ -2670,7 +2989,7 @@ class ControlServer:
                 ],
                 "u": compact_pid_bundle(self.control.pid, pid_digits),
                 "m": [
-                    compact_numeric(self.control.limits["hoverThrottle"], throttle_digits),
+                    compact_numeric(effective_hover_throttle, throttle_digits),
                     compact_numeric(self.control.limits["minThrottle"], throttle_digits),
                     compact_numeric(self.control.limits["maxThrottle"], throttle_digits),
                     compact_numeric(self.control.limits["maxTiltDeg"], angle_limit_digits),
@@ -2755,6 +3074,7 @@ class ControlServer:
                 "target": self.control.target,
                 "limits": self.control.limits,
                 "pid": self.control.pid,
+                "batteryHoverCompensation": self.control.battery_hover_compensation,
             },
             "telemetry": self.telemetry,
             "system": {
@@ -2840,6 +3160,12 @@ class ControlServer:
                         self.control.target = sanitize_target_config(control_payload["target"])
                     if "limits" in control_payload:
                         self.control.limits = sanitize_limit_config(control_payload["limits"])
+                    if "batteryHoverCompensation" in control_payload:
+                        self.control.battery_hover_compensation = (
+                            sanitize_battery_hover_compensation_config(
+                                control_payload["batteryHoverCompensation"]
+                            )
+                        )
                     if not self.control.active:
                         self.control.armed = False
 
@@ -2934,15 +3260,21 @@ class ControlServer:
                         self.telemetry = merge_telemetry(
                             pose,
                             self.serial_bridge.get_latest_imu(),
+                            self.serial_bridge.get_latest_battery(),
                         )
                         self.update_mocap_log_sample(self.telemetry, time.time())
                     else:
                         self.telemetry = merge_telemetry(
                             None,
                             self.serial_bridge.get_latest_imu(),
+                            self.serial_bridge.get_latest_battery(),
                         )
                         self.update_mocap_log_sample(self.telemetry, time.time())
                     self.update_safe_landing_state(time.time())
+                    self.update_battery_hover_compensation(time.time())
+                    self.telemetry["battery_hover_compensation"] = (
+                        self.build_battery_hover_compensation_status()
+                    )
                     imu_level_pending = self.is_imu_level_calibration_pending()
                     should_send_serial = (
                         (self.control.active and self.serial_bridge.is_connected())
@@ -2998,6 +3330,11 @@ class ControlServer:
                             )
                     self.serial_bridge.poll_incoming()
                     self.telemetry["imu"] = self.serial_bridge.get_latest_imu()
+                    self.telemetry["battery"] = self.serial_bridge.get_latest_battery()
+                    self.update_battery_hover_compensation(time.time())
+                    self.telemetry["battery_hover_compensation"] = (
+                        self.build_battery_hover_compensation_status()
+                    )
                     vision_metrics = (
                         self.get_session_vision_metrics()
                         if self.is_logging_active()
@@ -3039,6 +3376,11 @@ class ControlServer:
                 self.telemetry = merge_telemetry(
                     None,
                     self.serial_bridge.get_latest_imu(),
+                    self.serial_bridge.get_latest_battery(),
+                )
+                self.update_battery_hover_compensation(time.time())
+                self.telemetry["battery_hover_compensation"] = (
+                    self.build_battery_hover_compensation_status()
                 )
                 self.update_mocap_log_sample(self.telemetry, time.time())
                 self.mocap.camera_error = f"Tracking loop failed: {exc}"

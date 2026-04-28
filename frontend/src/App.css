@@ -436,6 +436,60 @@ button:disabled:hover {
   background: linear-gradient(180deg, rgba(239, 138, 138, 0.16), rgba(255, 255, 255, 0.04));
 }
 
+.battery-status-card {
+  display: grid;
+  gap: 0.85rem;
+  padding: 0.95rem;
+  border-radius: 18px;
+  border: 1px solid var(--border);
+  background: var(--panel-soft);
+}
+
+.battery-status-card.ready {
+  background: linear-gradient(180deg, rgba(110, 208, 169, 0.18), rgba(255, 255, 255, 0.04));
+}
+
+.battery-status-card.pending {
+  background: linear-gradient(180deg, rgba(242, 186, 100, 0.18), rgba(255, 255, 255, 0.04));
+}
+
+.battery-status-card.blocked {
+  background: linear-gradient(180deg, rgba(239, 138, 138, 0.18), rgba(255, 255, 255, 0.04));
+}
+
+.battery-status-main {
+  display: flex;
+  justify-content: space-between;
+  gap: 0.75rem;
+  align-items: flex-start;
+}
+
+.battery-status-main strong {
+  display: block;
+  margin-top: 0.15rem;
+  font-size: 1.35rem;
+}
+
+.battery-status-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
+  gap: 0.65rem;
+}
+
+.battery-status-grid div {
+  display: grid;
+  gap: 0.22rem;
+  padding: 0.7rem;
+  border-radius: 14px;
+  border: 1px solid var(--border);
+  background: rgba(255, 255, 255, 0.05);
+}
+
+.battery-status-grid span {
+  color: var(--muted);
+  font-size: 0.82rem;
+}
+
 .metric-card strong,
 .meta-row strong,
 .system-list strong,

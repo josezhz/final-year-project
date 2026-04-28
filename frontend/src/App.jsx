@@ -8,6 +8,15 @@ const EMPTY_TELEMETRY = {
   velocity: { x: 0, y: 0, z: 0 },
   rotation: { yaw: 0, pitch: 0, roll: 0 },
   imu: { ready: false, pitch: 0, roll: 0, pitch_rate: 0, roll_rate: 0 },
+  battery: { ready: false, voltage: 0, cell_voltage: 0, current: 0, capacity_mah: 0, remaining_percent: -1 },
+  battery_hover_compensation: {
+    enabled: false,
+    status: 'disabled',
+    baseHoverThrottle: 0,
+    adjustedHoverThrottle: 0,
+    correction: 0,
+    filteredVoltage: 0,
+  },
   error: 0,
   mapping_error_px: 0,
   model_fit_error_m: 0,
@@ -85,6 +94,35 @@ const TRAJECTORY_WINDOW_MS = 3000;
 
 function formatNumber(value, digits = 3) {
   return Number(value ?? 0).toFixed(digits);
+}
+
+function getBatteryTone(voltage, ready) {
+  if (!ready || voltage <= 0) {
+    return 'blocked';
+  }
+  if (voltage < 3.4) {
+    return 'blocked';
+  }
+  if (voltage < 3.5) {
+    return 'pending';
+  }
+  return 'ready';
+}
+
+function getBatteryLabel(voltage, ready) {
+  if (!ready || voltage <= 0) {
+    return 'Unavailable';
+  }
+  if (voltage < 3.4) {
+    return 'Critical';
+  }
+  if (voltage < 3.5) {
+    return 'Low';
+  }
+  if (voltage >= 4.1) {
+    return 'Full';
+  }
+  return 'Normal';
 }
 
 function buildLinePath(points, getX, getY) {
@@ -1048,6 +1086,29 @@ function App() {
     pitch: Number(telemetry.rotation?.pitch ?? 0),
     roll: Number(telemetry.rotation?.roll ?? 0),
   };
+  const battery = telemetry.battery ?? {};
+  const batteryReady = Boolean(battery.ready);
+  const batteryVoltage = Number(battery.cell_voltage ?? battery.voltage ?? 0);
+  const batteryCurrent = Number(battery.current ?? 0);
+  const batteryPercent = Number(battery.remaining_percent ?? -1);
+  const batteryHoverCompensation = telemetry.battery_hover_compensation ?? {};
+  const batteryTone = getBatteryTone(batteryVoltage, batteryReady);
+  const batteryLabel = getBatteryLabel(batteryVoltage, batteryReady);
+  const batteryPercentLabel = batteryPercent >= 0 && batteryPercent <= 100
+    ? `${batteryPercent.toFixed(0)}%`
+    : 'n/a';
+  const hoverCompStatus = batteryHoverCompensation.status || (
+    batteryHoverCompensation.enabled ? 'enabled' : 'disabled'
+  );
+  const adjustedHoverThrottle = Number(
+    batteryHoverCompensation.adjustedHoverThrottle
+      ?? batteryHoverCompensation.baseHoverThrottle
+      ?? localControl.limits.hoverThrottle
+      ?? 0,
+  );
+  const batteryDetail = batteryReady
+    ? `${formatNumber(batteryVoltage, 2)} V cell / ${batteryPercentLabel}`
+    : 'No CRSF battery telemetry yet';
   const targetError = {
     x: Number(localControl.target.x ?? 0) - livePosition.x,
     y: Number(localControl.target.y ?? 0) - livePosition.y,
@@ -1369,6 +1430,12 @@ function App() {
       detail: serverControl.armed ? 'Propellers may spin' : 'Disarmed output state',
       tone: serverControl.armed ? 'pending' : 'ready',
     },
+    {
+      label: 'Battery',
+      value: batteryReady ? `${formatNumber(batteryVoltage, 2)} V` : 'Waiting',
+      detail: batteryReady ? `${batteryLabel} 1S LiPo` : 'FC battery telemetry',
+      tone: batteryTone,
+    },
   ];
   const targetSummaryText = `X ${formatNumber(localControl.target.x, 2)} / Y ${formatNumber(localControl.target.y, 2)} / Z ${formatNumber(localControl.target.z, 2)} / Yaw ${formatNumber(localControl.target.yaw, 1)} deg`;
   const flightMetricCards = [
@@ -1419,6 +1486,14 @@ function App() {
         ? `Pitch ${formatNumber(telemetry.imu.pitch, 1)} / Roll ${formatNumber(telemetry.imu.roll, 1)} deg`
         : 'No flight-controller attitude yet',
       tone: telemetry.imu?.ready ? 'ready' : 'blocked',
+    },
+    {
+      label: '1S battery',
+      value: batteryReady ? `${formatNumber(batteryVoltage, 2)} V` : 'Waiting',
+      detail: batteryReady
+        ? `${batteryLabel} / ${batteryPercentLabel} / ${formatNumber(batteryCurrent, 2)} A`
+        : 'No CRSF battery frame yet',
+      tone: batteryTone,
     },
     {
       label: 'Logging',
@@ -1857,6 +1932,39 @@ function App() {
                   <small>{card.detail}</small>
                 </div>
               ))}
+            </div>
+
+            <div className={`battery-status-card ${batteryTone}`}>
+              <div className="battery-status-main">
+                <div>
+                  <span className="meta-label">1S LiPo</span>
+                  <strong>{batteryReady ? `${formatNumber(batteryVoltage, 2)} V` : 'Battery unavailable'}</strong>
+                </div>
+                <span className={`mini-badge ${batteryTone}`}>{batteryLabel}</span>
+              </div>
+              <div className="battery-status-grid">
+                <div>
+                  <span>Telemetry</span>
+                  <strong>{batteryReady ? 'Live' : 'Waiting'}</strong>
+                </div>
+                <div>
+                  <span>Remaining</span>
+                  <strong>{batteryPercentLabel}</strong>
+                </div>
+                <div>
+                  <span>Current</span>
+                  <strong>{batteryReady ? `${formatNumber(batteryCurrent, 2)} A` : 'n/a'}</strong>
+                </div>
+                <div>
+                  <span>Hover comp</span>
+                  <strong>{hoverCompStatus}</strong>
+                </div>
+                <div>
+                  <span>Adjusted hover</span>
+                  <strong>{formatNumber(adjustedHoverThrottle, 3)}</strong>
+                </div>
+              </div>
+              <p className="hint">{batteryDetail}</p>
             </div>
 
             <div className="pid-summary-grid">

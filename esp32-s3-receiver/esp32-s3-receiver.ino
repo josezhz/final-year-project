@@ -12,6 +12,7 @@ constexpr unsigned long STATUS_PRINT_INTERVAL_MS = 1000;
 constexpr unsigned long COMMAND_TIMEOUT_MS = 250;
 constexpr unsigned long FC_ATTITUDE_TIMEOUT_MS = 500;
 constexpr unsigned long FC_TELEMETRY_INTERVAL_MS = 50;
+constexpr unsigned long FC_BATTERY_TELEMETRY_INTERVAL_MS = 250;
 constexpr unsigned long CONTROLLER_STATUS_INTERVAL_MS = 500;
 // Keep manual USB testing human-friendly without changing the outer-loop timeout.
 constexpr unsigned long MANUAL_COMMAND_TIMEOUT_MS = 5000;
@@ -19,18 +20,24 @@ constexpr unsigned long MANUAL_COMMAND_TIMEOUT_MS = 5000;
 constexpr unsigned long MANUAL_ARM_THROTTLE_HOLD_MS = 1200;
 constexpr uint16_t MANUAL_ARM_LOW_THROTTLE_RC = 1000;
 // Apply the same low-throttle arming assist to frontend/ESP-NOW commands.
-constexpr unsigned long AUTO_ARM_THROTTLE_HOLD_MS = 1200;
+constexpr unsigned long AUTO_ARM_THROTTLE_HOLD_MS = 700;
+constexpr unsigned long AUTO_ARM_THROTTLE_RAMP_MS = 1800;
+constexpr unsigned long AUTO_TAKEOFF_ASSIST_MAX_MS = 5000;
 constexpr uint16_t AUTO_ARM_LOW_THROTTLE_RC = 1000;
+constexpr float AUTO_ARM_RAMP_EXTRA_THROTTLE = 0.03f;
+constexpr float AUTO_TAKEOFF_CONTROL_RELEASE_Z_M = 0.16f;
 constexpr float AUTO_THROTTLE_RISE_SLEW_RC_PER_SECOND = 450.0f;
 constexpr float AUTO_THROTTLE_FALL_SLEW_RC_PER_SECOND = 700.0f;
 constexpr unsigned long SAFE_LANDING_TRIGGER_GRACE_MS = 350;
 constexpr unsigned long SAFE_LANDING_DEFAULT_DURATION_MS = 5000;
 constexpr unsigned long SAFE_LANDING_MIN_DURATION_MS = 1000;
 constexpr unsigned long SAFE_LANDING_MAX_DURATION_MS = 10000;
+constexpr unsigned long SAFE_LANDING_CONTROL_MEMORY_MS = 2000;
 constexpr float SAFE_LANDING_DEFAULT_THROTTLE = 0.50f;
 constexpr size_t MAX_PAYLOAD_LENGTH = 251;
 constexpr size_t MAX_SERIAL_FRAME_LENGTH = MAX_PAYLOAD_LENGTH - 1;
 constexpr size_t CRSF_MAX_FRAME_LENGTH = 64;
+constexpr uint8_t CRSF_FRAME_TYPE_BATTERY_SENSOR = 0x08;
 constexpr uint8_t CRSF_FRAME_TYPE_ATTITUDE = 0x1E;
 
 constexpr uint8_t UART2_RX_PIN = 7;
@@ -140,6 +147,7 @@ bool safeLandingCompleted = false;
 unsigned long trackingLossStartedMs = 0;
 unsigned long safeLandingStartedMs = 0;
 unsigned long safeLandingDurationMs = SAFE_LANDING_DEFAULT_DURATION_MS;
+unsigned long lastNormalAutoControlMs = 0;
 uint16_t safeLandingStartThrottleRc = 1000;
 uint16_t safeLandingTargetThrottleRc = 1000;
 bool hasLastRxSequence = false;
@@ -170,8 +178,14 @@ float lastFcRollDeg = 0.0f;
 float lastFcYawDeg = 0.0f;
 float lastFcPitchRateDegS = 0.0f;
 float lastFcRollRateDegS = 0.0f;
+float lastFcBatteryVoltageV = 0.0f;
+float lastFcBatteryCurrentA = 0.0f;
+uint32_t lastFcBatteryCapacityMah = 0;
+int lastFcBatteryRemainingPercent = -1;
 unsigned long lastFcAttitudeRxMs = 0;
+unsigned long lastFcBatteryRxMs = 0;
 unsigned long lastFcTelemetryMs = 0;
+unsigned long lastFcBatteryTelemetryMs = 0;
 
 uint8_t incomingCrsfFrame[CRSF_MAX_FRAME_LENGTH] = {};
 size_t incomingCrsfFrameLength = 0;
@@ -212,6 +226,21 @@ float wrapDegrees(float angle) {
 int16_t readInt16BigEndian(const uint8_t *data) {
   return static_cast<int16_t>(
     (static_cast<uint16_t>(data[0]) << 8) | static_cast<uint16_t>(data[1])
+  );
+}
+
+uint16_t readUint16BigEndian(const uint8_t *data) {
+  return (
+    (static_cast<uint16_t>(data[0]) << 8)
+    | static_cast<uint16_t>(data[1])
+  );
+}
+
+uint32_t readUint24BigEndian(const uint8_t *data) {
+  return (
+    (static_cast<uint32_t>(data[0]) << 16)
+    | (static_cast<uint32_t>(data[1]) << 8)
+    | static_cast<uint32_t>(data[2])
   );
 }
 
@@ -322,6 +351,54 @@ uint16_t normalizedAxisToRc(float normalizedCommand, float sign = 1.0f) {
 uint16_t throttleToRc(float normalizedThrottle) {
   const float throttle = clampf(normalizedThrottle, 0.0f, 1.0f);
   return static_cast<uint16_t>(1000.0f + (throttle * 1000.0f));
+}
+
+bool isAutoArmThrottleRampActive(unsigned long nowMs) {
+  if (!autoArmCommandLatched || autoArmThrottleHoldActive) {
+    return false;
+  }
+  const unsigned long elapsedMs = nowMs - autoArmThrottleHoldStartedMs;
+  return (
+    elapsedMs >= AUTO_ARM_THROTTLE_HOLD_MS
+    && elapsedMs < (AUTO_ARM_THROTTLE_HOLD_MS + AUTO_ARM_THROTTLE_RAMP_MS)
+  );
+}
+
+bool isAutoTakeoffAssistActive(unsigned long nowMs) {
+  if (!autoArmCommandLatched || autoArmThrottleHoldActive) {
+    return false;
+  }
+  const unsigned long elapsedMs = nowMs - autoArmThrottleHoldStartedMs;
+  return (
+    elapsedMs < AUTO_TAKEOFF_ASSIST_MAX_MS
+    && flightCommand.position[2] < AUTO_TAKEOFF_CONTROL_RELEASE_Z_M
+  );
+}
+
+uint16_t applyAutoArmThrottleRampLimit(uint16_t requestedThrottleRc, unsigned long nowMs) {
+  if (!isAutoArmThrottleRampActive(nowMs)) {
+    return requestedThrottleRc;
+  }
+
+  const unsigned long rampElapsedMs = nowMs
+    - autoArmThrottleHoldStartedMs
+    - AUTO_ARM_THROTTLE_HOLD_MS;
+  const float progress = clampf(
+    static_cast<float>(rampElapsedMs) / static_cast<float>(AUTO_ARM_THROTTLE_RAMP_MS),
+    0.0f,
+    1.0f
+  );
+  const float rampTargetThrottle = min(
+    flightCommand.maxThrottle,
+    flightCommand.hoverThrottle + AUTO_ARM_RAMP_EXTRA_THROTTLE
+  );
+  const uint16_t rampTargetRc = throttleToRc(rampTargetThrottle);
+  const float rampCeilingRc = static_cast<float>(AUTO_ARM_LOW_THROTTLE_RC)
+    + ((static_cast<float>(rampTargetRc) - static_cast<float>(AUTO_ARM_LOW_THROTTLE_RC)) * progress);
+  return min(
+    requestedThrottleRc,
+    static_cast<uint16_t>(clampf(roundf(rampCeilingRc), AUTO_ARM_LOW_THROTTLE_RC, 2000.0f))
+  );
 }
 
 uint16_t slewRcValue(
@@ -753,6 +830,23 @@ void handleFlightControllerCrsfFrame(const uint8_t *frame, size_t frameLength) {
   const uint8_t frameType = frame[2];
   const uint8_t *payload = &frame[3];
   const size_t payloadSize = payloadLength - 2;
+
+  if (frameType == CRSF_FRAME_TYPE_BATTERY_SENSOR) {
+    if (payloadSize < 8) {
+      return;
+    }
+
+    lastFcBatteryVoltageV = static_cast<float>(readUint16BigEndian(payload)) * 0.1f;
+    lastFcBatteryCurrentA = static_cast<float>(readUint16BigEndian(payload + 2)) * 0.1f;
+    lastFcBatteryCapacityMah = readUint24BigEndian(payload + 4);
+    const uint8_t remainingPercent = payload[7];
+    lastFcBatteryRemainingPercent = remainingPercent <= 100
+      ? static_cast<int>(remainingPercent)
+      : -1;
+    lastFcBatteryRxMs = millis();
+    return;
+  }
+
   if (frameType != CRSF_FRAME_TYPE_ATTITUDE || payloadSize < 6) {
     return;
   }
@@ -850,6 +944,32 @@ void sendFlightControllerTelemetry() {
     fcAttitudeFresh ? lastFcRollRateDegS : 0.0f
   );
   emitBackendTelemetryLine(telemetryLine);
+
+  if ((nowMs - lastFcBatteryTelemetryMs) < FC_BATTERY_TELEMETRY_INTERVAL_MS) {
+    return;
+  }
+  lastFcBatteryTelemetryMs = nowMs;
+
+  const bool fcBatteryFresh = (
+    lastFcBatteryRxMs > 0
+    && (nowMs - lastFcBatteryRxMs) <= 2000
+  );
+  if (!fcBatteryFresh) {
+    return;
+  }
+
+  char batteryLine[128] = {};
+  snprintf(
+    batteryLine,
+    sizeof(batteryLine),
+    "!{\"t\":\"bat\",\"ok\":1,\"bv\":%.2f,\"bc\":%.2f,\"ba\":%.2f,\"mah\":%lu,\"pct\":%d}",
+    lastFcBatteryVoltageV,
+    lastFcBatteryVoltageV,
+    lastFcBatteryCurrentA,
+    static_cast<unsigned long>(lastFcBatteryCapacityMah),
+    lastFcBatteryRemainingPercent
+  );
+  emitBackendTelemetryLine(batteryLine);
 }
 
 float rcToUnitInterval(uint16_t rcValue) {
@@ -961,6 +1081,13 @@ void resetTrackingLossGrace() {
   trackingLossStartedMs = 0;
 }
 
+bool hasRecentNormalAutoControl(unsigned long nowMs) {
+  return (
+    lastNormalAutoControlMs > 0
+    && (nowMs - lastNormalAutoControlMs) <= SAFE_LANDING_CONTROL_MEMORY_MS
+  );
+}
+
 void resetSafeLandingState() {
   resetTrackingLossGrace();
   safeLandingActive = false;
@@ -977,7 +1104,7 @@ void beginSafeLanding(unsigned long nowMs) {
     return;
   }
 
-  if (lastRcArm < 1500) {
+  if (!hasRecentNormalAutoControl(nowMs)) {
     safeLandingCompleted = true;
     sendSafeDisarmedFrame();
     return;
@@ -986,8 +1113,9 @@ void beginSafeLanding(unsigned long nowMs) {
   const float currentThrottle = rcToUnitInterval(lastRcThrottle);
   const float landingThrottle = min(
     clampf(flightCommand.landingThrottle, 0.0f, 1.0f),
-    currentThrottle
+    max(currentThrottle, SAFE_LANDING_DEFAULT_THROTTLE)
   );
+  const uint16_t landingThrottleRc = throttleToRc(landingThrottle);
   safeLandingActive = true;
   safeLandingCompleted = false;
   safeLandingStartedMs = nowMs;
@@ -996,8 +1124,8 @@ void beginSafeLanding(unsigned long nowMs) {
     SAFE_LANDING_MIN_DURATION_MS,
     SAFE_LANDING_MAX_DURATION_MS
   );
-  safeLandingStartThrottleRc = lastRcThrottle;
-  safeLandingTargetThrottleRc = throttleToRc(landingThrottle);
+  safeLandingStartThrottleRc = max(lastRcThrottle, landingThrottleRc);
+  safeLandingTargetThrottleRc = landingThrottleRc;
 }
 
 bool runSafeLandingToFlightController(unsigned long nowMs) {
@@ -1036,10 +1164,17 @@ bool runSafeLandingToFlightController(unsigned long nowMs) {
   return true;
 }
 
-void holdLastArmedControlFrame() {
+void holdLastArmedControlFrame(unsigned long nowMs) {
   if (lastRcArm < 1500) {
-    sendSafeDisarmedFrame();
-    return;
+    if (!hasRecentNormalAutoControl(nowMs)) {
+      sendSafeDisarmedFrame();
+      return;
+    }
+    lastRcRoll = 1500;
+    lastRcPitch = 1500;
+    lastRcThrottle = max(lastRcThrottle, throttleToRc(flightCommand.landingThrottle));
+    lastRcYaw = 1500;
+    lastRcArm = 2000;
   }
   sendCRSF(lastRcRoll, lastRcPitch, lastRcThrottle, lastRcYaw, lastRcArm);
 }
@@ -1234,19 +1369,34 @@ void runOuterLoopToFlightController(float dtSeconds) {
   const bool controlReady = commandFresh && flightCommand.armed && flightCommand.spatialValid;
   lastControlHz = (controlReady || safeLandingActive) && dtSeconds > 0.0f ? (1.0f / dtSeconds) : 0.0f;
 
-  if (controlReady) {
-    resetSafeLandingState();
-  } else if (commandFresh && !flightCommand.armed) {
+  if (commandFresh && !flightCommand.armed) {
     resetSafeLandingState();
     resetAutoArmAssist();
     resetAllPidStates();
+    lastNormalAutoControlMs = 0;
     sendSafeDisarmedFrame();
     return;
   }
 
+  if (safeLandingCompleted) {
+    resetAutoArmAssist();
+    resetAllPidStates();
+    lastNormalAutoControlMs = 0;
+    sendSafeDisarmedFrame();
+    return;
+  }
+
+  if (controlReady) {
+    resetSafeLandingState();
+  }
+
   if (!controlReady && !safeLandingActive) {
     const bool explicitSafeLanding = commandFresh && flightCommand.armed && flightCommand.failsafeLanding;
-    const bool staleArmedCommand = !commandFresh && flightCommand.armed && lastRcArm >= 1500;
+    const bool staleArmedCommand = (
+      !commandFresh
+      && flightCommand.armed
+      && hasRecentNormalAutoControl(nowMs)
+    );
     const bool invalidArmedCommand = commandFresh && flightCommand.armed && !flightCommand.spatialValid;
     if (explicitSafeLanding || staleArmedCommand || invalidArmedCommand) {
       resetAutoArmAssist();
@@ -1263,12 +1413,12 @@ void runOuterLoopToFlightController(float dtSeconds) {
       if (runSafeLandingToFlightController(nowMs)) {
         return;
       }
-      holdLastArmedControlFrame();
+      holdLastArmedControlFrame(nowMs);
       return;
     }
   }
 
-  if (safeLandingActive || safeLandingCompleted) {
+  if (safeLandingActive) {
     resetAutoArmAssist();
     resetAllPidStates();
     if (runSafeLandingToFlightController(nowMs)) {
@@ -1282,6 +1432,7 @@ void runOuterLoopToFlightController(float dtSeconds) {
     resetSafeLandingState();
     resetAutoArmAssist();
     resetAllPidStates();
+    lastNormalAutoControlMs = 0;
     sendSafeDisarmedFrame();
     return;
   }
@@ -1337,7 +1488,7 @@ void runOuterLoopToFlightController(float dtSeconds) {
     MAX_WORLD_Z_VELOCITY_MPS
   );
 
-  const float worldXCommand = clampf(
+  float worldXCommand = clampf(
     runPid(
       flightCommand.xyVel,
       xVelPid,
@@ -1348,7 +1499,7 @@ void runOuterLoopToFlightController(float dtSeconds) {
     -1.0f,
     1.0f
   );
-  const float worldYCommand = clampf(
+  float worldYCommand = clampf(
     runPid(
       flightCommand.xyVel,
       yVelPid,
@@ -1375,6 +1526,18 @@ void runOuterLoopToFlightController(float dtSeconds) {
     -flightCommand.maxYawRateDeg,
     flightCommand.maxYawRateDeg
   );
+  if (isAutoTakeoffAssistActive(nowMs)) {
+    resetPidState(posXPid);
+    resetPidState(posYPid);
+    resetPidState(yawOuterPid);
+    resetPidState(xVelPid);
+    resetPidState(yVelPid);
+    lastDesiredWorldXVelocity = 0.0f;
+    lastDesiredWorldYVelocity = 0.0f;
+    worldXCommand = 0.0f;
+    worldYCommand = 0.0f;
+    lastDesiredYawRate = 0.0f;
+  }
 
   const float yawRad = flightCommand.rotation[0] * DEG_TO_RAD_F;
   const float forwardCommand = clampf(
@@ -1397,9 +1560,13 @@ void runOuterLoopToFlightController(float dtSeconds) {
 
   lastRcRoll = normalizedAxisToRc(rollNormalized, RC_ROLL_SIGN);
   lastRcPitch = normalizedAxisToRc(pitchNormalized, RC_PITCH_SIGN);
+  const uint16_t requestedThrottleRc = applyAutoArmThrottleRampLimit(
+    throttleToRc(requestedThrottle),
+    nowMs
+  );
   lastRcThrottle = slewRcValue(
     lastRcThrottle,
-    throttleToRc(requestedThrottle),
+    requestedThrottleRc,
     AUTO_THROTTLE_RISE_SLEW_RC_PER_SECOND,
     AUTO_THROTTLE_FALL_SLEW_RC_PER_SECOND,
     dtSeconds
@@ -1407,6 +1574,7 @@ void runOuterLoopToFlightController(float dtSeconds) {
   lastRcYaw = normalizedAxisToRc(yawNormalized, RC_YAW_SIGN);
   lastRcArm = 2000;
 
+  lastNormalAutoControlMs = nowMs;
   sendCRSF(lastRcRoll, lastRcPitch, lastRcThrottle, lastRcYaw, lastRcArm);
 }
 
@@ -1435,6 +1603,10 @@ void printStatus() {
     mode = "safe_landed";
   } else if (autoFresh && flightCommand.armed && flightCommand.spatialValid && autoArmThrottleHoldActive) {
     mode = "outer_arm_hold";
+  } else if (autoFresh && flightCommand.armed && flightCommand.spatialValid && isAutoTakeoffAssistActive(millis())) {
+    mode = "outer_takeoff_assist";
+  } else if (autoFresh && flightCommand.armed && flightCommand.spatialValid && isAutoArmThrottleRampActive(millis())) {
+    mode = "outer_arm_ramp";
   } else if (autoFresh && flightCommand.armed && flightCommand.spatialValid) {
     mode = "outer";
   } else if (autoFresh && flightCommand.armed && flightCommand.failsafeLanding) {
@@ -1445,8 +1617,12 @@ void printStatus() {
     mode = "waiting_pose";
   }
 
+  const bool fcBatteryFresh = (
+    lastFcBatteryRxMs > 0
+    && (millis() - lastFcBatteryRxMs) <= 2000
+  );
   Serial.printf(
-    "mode=%s autoFresh=%d autoArm=%d ok=%d manEn=%d manFresh=%d manArm=%d manRaw=%d pos=(%.2f,%.2f,%.2f) vel=(%.2f,%.2f,%.2f) yaw=%.1f target=(%.2f,%.2f,%.2f|%.1f) outerVel=(%.2f,%.2f,%.2f) tilt=(%.1f,%.1f) yawRate=%.1f rc=(%u,%u,%u,%u,%u)\n",
+    "mode=%s autoFresh=%d autoArm=%d ok=%d manEn=%d manFresh=%d manArm=%d manRaw=%d bat=(%d,%.2fV,%.2fA,%d%%) pos=(%.2f,%.2f,%.2f) vel=(%.2f,%.2f,%.2f) yaw=%.1f target=(%.2f,%.2f,%.2f|%.1f) outerVel=(%.2f,%.2f,%.2f) tilt=(%.1f,%.1f) yawRate=%.1f rc=(%u,%u,%u,%u,%u)\n",
     mode,
     autoFresh ? 1 : 0,
     flightCommand.armed ? 1 : 0,
@@ -1455,6 +1631,10 @@ void printStatus() {
     manualFresh ? 1 : 0,
     manualControl.armed ? 1 : 0,
     manualControl.useRawRc ? 1 : 0,
+    fcBatteryFresh ? 1 : 0,
+    fcBatteryFresh ? lastFcBatteryVoltageV : 0.0f,
+    fcBatteryFresh ? lastFcBatteryCurrentA : 0.0f,
+    fcBatteryFresh ? lastFcBatteryRemainingPercent : -1,
     flightCommand.position[0],
     flightCommand.position[1],
     flightCommand.position[2],
