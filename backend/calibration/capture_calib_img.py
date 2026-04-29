@@ -2,9 +2,7 @@ import cv2 as cv
 import os
 from pseyepy import Camera
 
-# --- CONFIGURATION ---
 SAVE_DIR = "backend/calibration/calib_img"
-# MUST match the inner corners of your board (squares minus 1)
 CHESSBOARD_SIZE = (9, 14) 
 
 if not os.path.exists(SAVE_DIR):
@@ -56,7 +54,6 @@ def main():
             print("No cameras detected.")
             return
 
-        # --- STEP 1: MANUALLY LABEL EACH CAMERA ---
         camera_labels = {}
         for i in range(num_cams):
             while True:
@@ -75,7 +72,6 @@ def main():
                     break
         cv.destroyWindow("Labeling Mode")
 
-        # --- STEP 2: CAPTURE SESSION WITH PATTERN RECOGNITION ---
         print("\n--- Capture Mode ---")
         print("Controls: [Space] to Save, [D] to Delete Last Saved, [Q] to Quit")
 
@@ -88,18 +84,14 @@ def main():
                 frame_bgr = cv.cvtColor(frames[i], cv.COLOR_RGB2BGR)
                 gray = cv.cvtColor(frame_bgr, cv.COLOR_BGR2GRAY)
                 
-                # --- PATTERN RECOGNITION ---
-                # Find corners to show user if the board is clear enough
                 ret, corners = cv.findChessboardCorners(gray, CHESSBOARD_SIZE, None)
                 
                 if ret:
-                    # Draw the pattern on the screen (visual feedback only)
                     cv.drawChessboardCorners(frame_bgr, CHESSBOARD_SIZE, corners, ret)
-                    status_color = (0, 255, 0) # Green if found
+                    status_color = (0, 255, 0)
                 else:
-                    status_color = (0, 0, 255) # Red if not found
+                    status_color = (0, 0, 255)
 
-                # Add status text to each window
                 lbl = camera_labels[i]
                 cv.putText(frame_bgr, f"Cam {lbl} - Pattern: {ret}", (10, 30), 
                            cv.FONT_HERSHEY_SIMPLEX, 0.6, status_color, 2)
@@ -114,7 +106,6 @@ def main():
                     lbl = camera_labels[i]
                     filename = f"cam{lbl}_{count}.jpg"
                     filepath = os.path.join(SAVE_DIR, filename)
-                    # We save the original frame (without the lines drawn on it)
                     img_to_save = cv.cvtColor(frames[i], cv.COLOR_RGB2BGR)
                     cv.imwrite(filepath, img_to_save)
                 print(f"Saved snapshot #{count} (Ensure pattern was detected for best results!)")

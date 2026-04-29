@@ -4,14 +4,12 @@ import numpy as np
 import json
 from scipy.spatial.transform import Rotation as R
 
-# --- SETTINGS ---
 PARAMS_PATH = "backend/calibration/camera_intrinsics.json"
 OUTPUT_PATH = "backend/calibration/camera_extrinsics.json"
 MARKER_SIZE = 0.16  
 DICT_TYPE = cv.aruco.DICT_4X4_1000
 TARGET_CAPTURES = 10
 
-# 1. Load Intrinsics
 with open(PARAMS_PATH, "r") as f:
     calib_data = json.load(f)
 
@@ -26,24 +24,20 @@ detector = cv.aruco.ArucoDetector(cv.aruco.getPredefinedDictionary(DICT_TYPE), c
 
 def calculate_average_pose(pose_list):
     """Averages a list of 4x4 matrices using Quaternions for rotation."""
-    # Average Translation
     t_vecs = [p[:3, 3] for p in pose_list]
     avg_t = np.mean(t_vecs, axis=0)
 
-    # Average Rotation
     rots = [R.from_matrix(p[:3, :3]) for p in pose_list]
     quats = [r.as_quat() for r in rots]
     avg_quat = np.mean(quats, axis=0)
     avg_quat /= np.linalg.norm(avg_quat)
     avg_R = R.from_quat(avg_quat).as_matrix()
 
-    # Reconstruct 4x4
     avg_pose = np.eye(4)
     avg_pose[:3, :3] = avg_R
     avg_pose[:3, 3] = avg_t
     return avg_pose
 
-# Storage for snapshots: {cam_index: [list_of_matrices]}
 captured_data = {}
 
 try:
@@ -57,7 +51,7 @@ try:
         frames, _ = c.read()
         if num_cams == 1: frames = [frames]
         
-        current_frame_poses = {} # Temp store for current sync-frame
+        current_frame_poses = {}
 
         for i, raw_frame in enumerate(frames):
             frame = raw_frame.copy()
@@ -67,7 +61,6 @@ try:
             mtx = np.array(calib_data[cam_key]["camera_matrix"], dtype=np.float32)
             dist = np.array(calib_data[cam_key]["dist_coeff"], dtype=np.float32)
 
-            # --- Apply Dynamic Scaling ---
             scale_factor = w / (mtx[0, 2] * 2) 
             if scale_factor != 1.0:
                 mtx[0, 0] *= scale_factor
@@ -80,7 +73,6 @@ try:
             if ids is not None:
                 success, rvec, tvec = cv.solvePnP(obj_points, corners[0], mtx, dist)
                 if success:
-                    # Calculate T_cam_to_world
                     R_mat, _ = cv.Rodrigues(rvec)
                     T_m2c = np.eye(4)
                     T_m2c[:3, :3] = R_mat
@@ -89,7 +81,6 @@ try:
                     
                     current_frame_poses[i] = T_c2w
                     
-                    # Visual Feedback
                     cv.drawFrameAxes(frame, mtx, dist, rvec, tvec, 0.1)
                     x, y, z = T_c2w[:3, 3]
                     cv.putText(frame, f"Pos: {x:.2f}, {y:.2f}, {z:.2f}", (10, 30), 
@@ -97,7 +88,6 @@ try:
 
             cv.imshow(f"Cam {i+1}", frame)
 
-        # Handle Input
         key = cv.waitKey(1) & 0xFF
         if key == ord('s'):
             if len(current_frame_poses) == num_cams:
@@ -109,7 +99,6 @@ try:
         elif key == ord('q'):
             break
 
-    # --- Process and Save Averages ---
     if len(captured_data[0]) == TARGET_CAPTURES:
         final_json = {}
         for i in range(num_cams):

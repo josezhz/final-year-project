@@ -3,19 +3,16 @@ import cv2 as cv
 import glob
 import json
 
-# --- SETTINGS ---
 CHECKERBOARD = (9, 14) 
-SQUARE_SIZE = 0.2685 / 15     # [m]
-CAMERA_INDICES = [1, 2, 3]  # List of cameras to process
+SQUARE_SIZE = 0.2685 / 15
+CAMERA_INDICES = [1, 2, 3]
 
 criteria = (cv.TERM_CRITERIA_EPS + cv.TERM_CRITERIA_MAX_ITER, 30, 0.001)
 
-# Prepare 3D object points
 objp = np.zeros((CHECKERBOARD[0] * CHECKERBOARD[1], 3), np.float32)
 objp[:, :2] = np.mgrid[0:CHECKERBOARD[0], 0:CHECKERBOARD[1]].T.reshape(-1, 2)
 objp *= SQUARE_SIZE
 
-# Dictionary to store all calibration results
 all_calibrations = {}
 
 for cam_idx in CAMERA_INDICES:
@@ -42,13 +39,11 @@ for cam_idx in CAMERA_INDICES:
             corners2 = cv.cornerSubPix(gray, corners, (11, 11), (-1, -1), criteria)
             imgpoints.append(corners2)
 
-    # Run calibration
     ret, mtx, dist, rvecs, tvecs = cv.calibrateCamera(objpoints, imgpoints, img_size, None, None)
 
     if ret:
         print(f"Calibration Successful for Camera {cam_idx} (RMS: {ret:.4f})")
         
-        # Store in nested dictionary
         all_calibrations[f"cam{cam_idx}"] = {
             "camera_matrix": mtx.tolist(),
             "dist_coeff": dist.tolist(),
@@ -58,7 +53,6 @@ for cam_idx in CAMERA_INDICES:
     else:
         print(f"Calibration failed for Camera {cam_idx}")
 
-# --- SAVE ALL DATA TO ONE FILE ---
 output_filename = "backend/calibration/camera_intrinsics.json"
 with open(output_filename, "w") as f:
     json.dump(all_calibrations, f, indent=4)

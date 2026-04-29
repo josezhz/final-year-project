@@ -518,8 +518,6 @@ def compact_numeric(value, digits=4):
     if math.isclose(rounded, integer_value, abs_tol=10 ** -digits):
         return integer_value
 
-    # Re-parse a fixed-width decimal string so json.dumps emits the shortest
-    # numeric representation instead of preserving trailing float artifacts.
     return float(f"{rounded:.{digits}f}".rstrip("0").rstrip("."))
 
 
@@ -824,19 +822,15 @@ def detect_leds(frame):
     if len(led_candidates) < MAX_LEDS:
         return [(l["x"], l["y"]) for l in led_candidates]
 
-    # 1. Take top 3 by area/intensity if more than 3 found (optional filter)
     top_three = sorted(
         led_candidates,
         key=lambda candidate: candidate["area"],
         reverse=True,
     )[:MAX_LEDS]
 
-    # 2. Calculate Centroid of the 3 points
     cx = sum(l["x"] for l in top_three) / MAX_LEDS
     cy = sum(l["y"] for l in top_three) / MAX_LEDS
 
-    # 3. Sort by angle around centroid (atan2(y-cy, x-cx))
-    # This creates a consistent clockwise or counter-clockwise sequence
     top_three.sort(key=lambda l: math.atan2(l["y"] - cy, l["x"] - cx))
 
     return [(l["x"], l["y"]) for l in top_three]
@@ -973,7 +967,6 @@ def find_best_clockwise_mapping(all_cam_leds, proj_mats, previous_led_points=Non
     best_points = None
 
     shift_ranges = [range(MAX_LEDS) for _ in all_cam_leds]
-    # 3 cameras x 3 LEDs -> 3^3 = 27 combinations.
     for shifts in np.ndindex(*[len(options) for options in shift_ranges]):
         mapped_leds = [
             cyclic_shift(cam_leds, shift)
@@ -1087,7 +1080,6 @@ def solve_pose(
     semantic_permutation = semantic_pose["semantic_permutation"]
     semantic_points = semantic_pose["semantic_points"]
 
-    # Check if fit is acceptable
     if fit_error >= MAX_FIT_ERROR:
         return None
 
@@ -1662,7 +1654,6 @@ class MotionCaptureEngine:
         
         self.motion_state_filter = MotionStateKalmanFilter()
         
-        # Attitude filters
         self.attitude_filters = {
             "yaw": ScalarKalmanFilter(1.0, 2.0),
             "pitch": ScalarKalmanFilter(1.0, 2.0),
@@ -1879,7 +1870,6 @@ class MotionCaptureEngine:
         """Filter translation with a pos/vel/accel state model and smooth attitude."""
         yaw_raw, pitch_raw, roll_raw = rotation_matrix_to_euler_zyx(rotation_matrix)
         
-        # Unwrap angles
         if self.last_unwrapped_angles is None:
             unwrapped_angles = {
                 "yaw": yaw_raw,
@@ -1951,7 +1941,6 @@ class MotionCaptureEngine:
             )
         ]
         
-        # Update previews and frame timing
         now = time.time()
         detected_led_counts = [len(leds) for leds in all_cam_leds]
         if (
@@ -1971,7 +1960,6 @@ class MotionCaptureEngine:
             for preview, leds in zip(self.latest_preview_frames, all_cam_leds):
                 preview["ledCount"] = len(leds)
         
-        # Check LED detection
         if not all(len(leds) == MAX_LEDS for leds in all_cam_leds_undistorted):
             self.camera_error = "Waiting for each camera to detect exactly three LEDs."
             self.motion_state_filter.reset()
@@ -1999,7 +1987,6 @@ class MotionCaptureEngine:
             previous_led_points=self.last_led_points,
         )
 
-        # Solve pose
         pose = solve_pose(
             all_cam_leds_undistorted,
             self.proj_mats,
@@ -2035,7 +2022,6 @@ class MotionCaptureEngine:
                 "spatial_data_valid": False,
             }
 
-        # Extract and filter
         raw_rotation = pose.pop("rotation_matrix")
         translation = pose.pop("translation_vector")
         mapping_shifts = pose.pop("mapping_shifts", None)
@@ -2054,7 +2040,6 @@ class MotionCaptureEngine:
         pose["velocity"] = filtered_velocity
         pose["rotation"] = filtered_angles
 
-        # Relabel preview LEDs using solved semantic ordering: Front, Right, Left.
         semantic_labels = ["F", "R", "L"]
         mapped_raw_leds = [
             cyclic_shift(leds, int(shift))
@@ -2074,7 +2059,6 @@ class MotionCaptureEngine:
         ]
         self.last_preview_update = now
         
-        # Store for next iteration
         self.last_rotation = raw_rotation.copy()
         self.last_translation = translation.copy()
         if semantic_led_points is not None:
