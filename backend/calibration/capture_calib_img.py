@@ -3,7 +3,7 @@ import os
 from pseyepy import Camera
 
 SAVE_DIR = "backend/calibration/calib_img"
-CHESSBOARD_SIZE = (9, 14) 
+CHESSBOARD_SIZE = (9, 14)
 
 if not os.path.exists(SAVE_DIR):
     os.makedirs(SAVE_DIR)

@@ -6,7 +6,7 @@ from scipy.spatial.transform import Rotation as R
 
 PARAMS_PATH = "backend/calibration/camera_intrinsics.json"
 OUTPUT_PATH = "backend/calibration/camera_extrinsics.json"
-MARKER_SIZE = 0.16  
+MARKER_SIZE = 0.16
 DICT_TYPE = cv.aruco.DICT_4X4_1000
 TARGET_CAPTURES = 10
 

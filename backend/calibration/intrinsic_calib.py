@@ -3,7 +3,7 @@ import cv2 as cv
 import glob
 import json
 
-CHECKERBOARD = (9, 14) 
+CHECKERBOARD = (9, 14)
 SQUARE_SIZE = 0.2685 / 15
 CAMERA_INDICES = [1, 2, 3]
 

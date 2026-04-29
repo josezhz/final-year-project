@@ -27,7 +27,7 @@ At a high level, the system works like this:
 
 ## Repository Structure
 
-- `backend/`: tracking logic, calibration tools and assets, logs, and the main server in `backend/index.py`
+- `backend/`: tracking logic, calibration tools, session logging, and the main server in `backend/index.py`
 - `frontend/`: Vite + React operator dashboard for setup, live monitoring, and tuning
 - `esp32-s3-sender/`: ESP32-S3 sketch for USB serial reception and ESP-NOW forwarding
 - `esp32-s3-receiver/`: ESP32-S3 sketch that receives mocap commands over ESP-NOW and outputs CRSF-style control frames to the flight controller
@@ -116,6 +116,6 @@ Setup notes:
 
 - This README describes the Betaflight flight-controller branch, not the earlier ESP-drone control path.
 - `frontend/node_modules/` is intentionally ignored and should not be committed.
-- Calibration parameters under `backend/calibration/` are tracked; raw capture images under `backend/calibration/calib_img/` are ignored.
 - Runtime session logs are written under `backend/data_logs/` and are intentionally ignored by Git.
+- Calibration parameters under `backend/calibration/` are tracked; raw capture images under `backend/calibration/calib_img/` are ignored.
 - This repository is structured as an implementation-focused project artifact, so it contains development code and supporting calibration assets.

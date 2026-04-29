@@ -866,6 +866,7 @@ function PidAxisCard({
           </label>
         ))}
       </div>
+
     </div>
   );
 }
