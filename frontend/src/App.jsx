@@ -327,7 +327,7 @@ function CameraPoseScene({ cameraPoses, telemetry }) {
   );
 }
 
-function XYTrajectoryChart({ samples, telemetry }) {
+function XYTrajectoryChart({ samples, telemetry, target }) {
   const width = 520;
   const height = 320;
   const padding = 34;
@@ -347,6 +347,8 @@ function XYTrajectoryChart({ samples, telemetry }) {
   const latest = samples.at(-1);
   const latestX = latest ? scaleX(latest.x) : scaleX(telemetry.position.x);
   const latestY = latest ? scaleY(latest.y) : scaleY(telemetry.position.y);
+  const targetX = scaleX(Number(target?.x ?? 0));
+  const targetY = scaleY(Number(target?.y ?? 0));
   const planeLength = innerWidth * 0.055;
   const planeWidth = planeLength * 0.72;
   const planeTailInset = planeLength * 0.34;
@@ -431,6 +433,11 @@ function XYTrajectoryChart({ samples, telemetry }) {
         <polygon points={planePolygon} className="chart-yaw-plane" />
 
         <circle cx={scaleX(0)} cy={scaleY(0)} r="4" className="chart-origin" />
+        <circle cx={targetX} cy={targetY} r="6" className="chart-target-point" />
+        <circle cx={targetX} cy={targetY} r="11" className="chart-target-ring" />
+        <text x={Math.min(targetX + 10, width - padding - 44)} y={Math.max(targetY - 10, padding + 12)} className="chart-target-label">
+          Target
+        </text>
 
         <text x={width - padding} y={height - 8} textAnchor="end" className="chart-label">
           X ({formatNumber(domain.xMin, 2)} to {formatNumber(domain.xMax, 2)})
@@ -458,7 +465,7 @@ function XYTrajectoryChart({ samples, telemetry }) {
   );
 }
 
-function ZTimelineChart({ samples, telemetry }) {
+function ZTimelineChart({ samples, telemetry, target }) {
   const width = 520;
   const height = 320;
   const padding = 34;
@@ -471,6 +478,7 @@ function ZTimelineChart({ samples, telemetry }) {
   const scaleX = buildTimeScaleX(samples, padding, innerWidth);
   const scaleY = (value) => height - padding - ((value - domainMin) / (domainMax - domainMin || 1)) * innerHeight;
   const path = buildLinePath(samples, (sample) => scaleX(sample.t), (sample) => scaleY(sample.z));
+  const targetZ = Number(target?.z ?? 0);
 
   return (
     <div className="chart-card">
@@ -507,6 +515,10 @@ function ZTimelineChart({ samples, telemetry }) {
         ))}
 
         {path ? <path d={path} className="chart-line chart-line-z" /> : null}
+        <line x1={padding} y1={scaleY(targetZ)} x2={width - padding} y2={scaleY(targetZ)} className="chart-target-line" />
+        <text x={width - padding - 64} y={Math.max(scaleY(targetZ) - 8, padding + 12)} className="chart-target-label">
+          Target Z
+        </text>
         {samples.map((sample, index) => (
           <circle
             key={sample.id}
@@ -550,8 +562,8 @@ function ZTimelineChart({ samples, telemetry }) {
           <strong>{formatNumber(telemetry.position.z)}</strong>
         </div>
         <div>
-          <span className="meta-label">Samples</span>
-          <strong>{samples.length}</strong>
+          <span className="meta-label">Target Z</span>
+          <strong>{formatNumber(targetZ)}</strong>
         </div>
       </div>
     </div>
@@ -568,6 +580,7 @@ function DualMetricTimelineChart({
   yLabel,
   fallbackAbsMax,
   series,
+  targetLines = [],
 }) {
   const width = 520;
   const height = 320;
@@ -623,6 +636,23 @@ function DualMetricTimelineChart({
           return path ? <path key={item.key} d={path} className={`chart-line ${item.lineClassName}`} /> : null;
         })}
 
+        {targetLines.map((line) => (
+          <g key={line.key}>
+            <line
+              x1={padding}
+              y1={scaleY(line.value)}
+              x2={width - padding}
+              y2={scaleY(line.value)}
+              className={`chart-target-line ${line.className ?? ''}`.trim()}
+            />
+            {line.label ? (
+              <text x={width - padding - 88} y={Math.max(scaleY(line.value) - 8, padding + 12)} className="chart-target-label">
+                {line.label}
+              </text>
+            ) : null}
+          </g>
+        ))}
+
         {latest ? series.map((item) => (
           <circle
             key={item.key}
@@ -671,6 +701,7 @@ function ImuAttitudeChart({ samples, telemetry }) {
       statusLabel={imu.ready ? 'FC attitude live' : 'Awaiting FC attitude'}
       yLabel="Deg"
       fallbackAbsMax={8}
+      targetLines={[{ key: 'level', value: 0, label: 'Target level' }]}
       series={[
         {
           key: 'pitch',
@@ -737,66 +768,13 @@ function ImuRateChart({ samples, telemetry }) {
   );
 }
 
-function TrajectoryPanel({ telemetry, samples }) {
+function TrajectoryPanel({ telemetry, samples, target }) {
   return (
     <div className="trajectory-layout">
-      <XYTrajectoryChart samples={samples} telemetry={telemetry} />
-      <ZTimelineChart samples={samples} telemetry={telemetry} />
+      <XYTrajectoryChart samples={samples} telemetry={telemetry} target={target} />
+      <ZTimelineChart samples={samples} telemetry={telemetry} target={target} />
       <ImuAttitudeChart samples={samples} telemetry={telemetry} />
       <ImuRateChart samples={samples} telemetry={telemetry} />
-    </div>
-  );
-}
-
-function wrapAngleDegrees(value) {
-  let angle = Number(value ?? 0);
-  while (angle > 180) {
-    angle -= 360;
-  }
-  while (angle < -180) {
-    angle += 360;
-  }
-  return angle;
-}
-
-function formatSignedNumber(value, digits = 3) {
-  const numeric = Number(value ?? 0);
-  return `${numeric > 0 ? '+' : ''}${numeric.toFixed(digits)}`;
-}
-
-function SnapshotCard({ label, current, target, error, unit, digits = 3, tolerance = 0.05 }) {
-  const stateClass =
-    Math.abs(error) <= tolerance ? 'settled' : Math.abs(error) <= tolerance * 2 ? 'watch' : 'wide';
-
-  return (
-    <div className={`snapshot-card ${stateClass}`}>
-      <div className="snapshot-heading">
-        <span className="meta-label">{label}</span>
-        <strong>{Math.abs(error) <= tolerance ? 'In band' : 'Needs trim'}</strong>
-      </div>
-      <div className="snapshot-values">
-        <div>
-          <span>Current</span>
-          <strong>
-            {formatNumber(current, digits)}
-            {unit}
-          </strong>
-        </div>
-        <div>
-          <span>Target</span>
-          <strong>
-            {formatNumber(target, digits)}
-            {unit}
-          </strong>
-        </div>
-        <div>
-          <span>Error</span>
-          <strong>
-            {formatSignedNumber(error, digits)}
-            {unit}
-          </strong>
-        </div>
-      </div>
     </div>
   );
 }
@@ -807,16 +785,6 @@ function PidAxisCard({
   title,
   pid,
   step,
-  liveLabel,
-  liveValue,
-  liveDigits = 3,
-  targetLabel,
-  targetValue,
-  targetDigits = 3,
-  errorLabel,
-  errorValue,
-  errorDigits = 3,
-  unit = '',
   onChange,
 }) {
   return (
@@ -827,30 +795,6 @@ function PidAxisCard({
           <h3>{title}</h3>
         </div>
         <span className="axis-chip">Outer loop</span>
-      </div>
-
-      <div className="pid-readout-grid">
-        <div className="pid-readout">
-          <span>{liveLabel}</span>
-          <strong>
-            {formatNumber(liveValue, liveDigits)}
-            {unit}
-          </strong>
-        </div>
-        <div className="pid-readout">
-          <span>{targetLabel}</span>
-          <strong>
-            {formatNumber(targetValue, targetDigits)}
-            {unit}
-          </strong>
-        </div>
-        <div className="pid-readout">
-          <span>{errorLabel}</span>
-          <strong>
-            {formatSignedNumber(errorValue, errorDigits)}
-            {unit}
-          </strong>
-        </div>
       </div>
 
       <div className="pid-input-row">
@@ -1055,12 +999,6 @@ function App() {
     y: Number(telemetry.position?.y ?? 0),
     z: Number(telemetry.position?.z ?? 0),
   };
-  const liveVelocity = {
-    x: Number(telemetry.velocity?.x ?? 0),
-    y: Number(telemetry.velocity?.y ?? 0),
-    z: Number(telemetry.velocity?.z ?? 0),
-  };
-  const liveHorizontalSpeed = Math.hypot(liveVelocity.x, liveVelocity.y);
   const liveRotation = {
     yaw: Number(telemetry.rotation?.yaw ?? 0),
     pitch: Number(telemetry.rotation?.pitch ?? 0),
@@ -1076,12 +1014,6 @@ function App() {
   const batteryPercentLabel = batteryPercent >= 0 && batteryPercent <= 100
     ? `${batteryPercent.toFixed(0)}%`
     : 'n/a';
-  const targetError = {
-    x: Number(localControl.target.x ?? 0) - livePosition.x,
-    y: Number(localControl.target.y ?? 0) - livePosition.y,
-    z: Number(localControl.target.z ?? 0) - livePosition.z,
-    yaw: wrapAngleDegrees(Number(localControl.target.yaw ?? 0) - liveRotation.yaw),
-  };
   const canRequestImuLevelCalibration = (
     connectionState === 'Connected'
     && Boolean(serverControl.serialPort)
@@ -1166,68 +1098,12 @@ function App() {
           : 'Needs serial + stream',
     },
   ];
-  const snapshotCards = [
-    {
-      label: 'X hold',
-      current: livePosition.x,
-      target: localControl.target.x,
-      error: targetError.x,
-      unit: ' m',
-      tolerance: 0.03,
-    },
-    {
-      label: 'Y hold',
-      current: livePosition.y,
-      target: localControl.target.y,
-      error: targetError.y,
-      unit: ' m',
-      tolerance: 0.03,
-    },
-    {
-      label: 'Z hold',
-      current: livePosition.z,
-      target: localControl.target.z,
-      error: targetError.z,
-      unit: ' m',
-      tolerance: 0.04,
-    },
-    {
-      label: 'Heading',
-      current: liveRotation.yaw,
-      target: localControl.target.yaw,
-      error: targetError.yaw,
-      unit: ' deg',
-      digits: 2,
-      tolerance: 5,
-    },
-  ];
   const outerLoopCards = [
     {
-      id: 'x-pos',
+      id: 'xy-pos',
       pidAxis: 'xyPos',
-      axisLabel: 'X position',
-      title: 'X hold',
-      liveLabel: 'Current X',
-      liveValue: livePosition.x,
-      targetLabel: 'Target X',
-      targetValue: localControl.target.x,
-      errorLabel: 'X error',
-      errorValue: targetError.x,
-      unit: ' m',
-      step: '0.01',
-    },
-    {
-      id: 'y-pos',
-      pidAxis: 'xyPos',
-      axisLabel: 'Y position',
-      title: 'Y hold',
-      liveLabel: 'Current Y',
-      liveValue: livePosition.y,
-      targetLabel: 'Target Y',
-      targetValue: localControl.target.y,
-      errorLabel: 'Y error',
-      errorValue: targetError.y,
-      unit: ' m',
+      axisLabel: 'XY position',
+      title: 'XY hold',
       step: '0.01',
     },
     {
@@ -1235,13 +1111,6 @@ function App() {
       pidAxis: 'zPos',
       axisLabel: 'Z altitude',
       title: 'Z hold',
-      liveLabel: 'Current Z',
-      liveValue: livePosition.z,
-      targetLabel: 'Target Z',
-      targetValue: localControl.target.z,
-      errorLabel: 'Z error',
-      errorValue: targetError.z,
-      unit: ' m',
       step: '0.01',
     },
     {
@@ -1249,16 +1118,6 @@ function App() {
       pidAxis: 'yawPos',
       axisLabel: 'Yaw heading',
       title: 'Yaw hold',
-      liveLabel: 'Current yaw',
-      liveValue: liveRotation.yaw,
-      targetLabel: 'Target yaw',
-      targetValue: localControl.target.yaw,
-      errorLabel: 'Yaw error',
-      errorValue: targetError.yaw,
-      liveDigits: 2,
-      targetDigits: 2,
-      errorDigits: 2,
-      unit: ' deg',
       step: '0.01',
     },
     {
@@ -1266,13 +1125,6 @@ function App() {
       pidAxis: 'xyVel',
       axisLabel: 'XY velocity',
       title: 'XY damping',
-      liveLabel: 'Horizontal speed',
-      liveValue: liveHorizontalSpeed,
-      targetLabel: 'Steady hover',
-      targetValue: 0,
-      errorLabel: 'Residual speed',
-      errorValue: liveHorizontalSpeed,
-      unit: ' m/s',
       step: '0.01',
     },
     {
@@ -1280,13 +1132,6 @@ function App() {
       pidAxis: 'zVel',
       axisLabel: 'Z velocity',
       title: 'Z damping',
-      liveLabel: 'Vertical speed',
-      liveValue: liveVelocity.z,
-      targetLabel: 'Steady hover',
-      targetValue: 0,
-      errorLabel: 'Residual Vz',
-      errorValue: liveVelocity.z,
-      unit: ' m/s',
       step: '0.01',
     },
   ];
@@ -1346,16 +1191,6 @@ function App() {
       detail: 'Height above origin',
     },
     {
-      label: 'Horizontal speed',
-      value: `${formatNumber(liveHorizontalSpeed)} m/s`,
-      detail: 'Combined XY motion',
-    },
-    {
-      label: 'Vertical speed',
-      value: `${formatNumber(liveVelocity.z)} m/s`,
-      detail: 'Climb or sink rate',
-    },
-    {
       label: 'Yaw',
       value: `${formatNumber(liveRotation.yaw, 2)} deg`,
       detail: 'Heading',
@@ -1369,28 +1204,6 @@ function App() {
       label: 'Roll',
       value: `${formatNumber(liveRotation.roll, 2)} deg`,
       detail: 'Side-to-side tilt',
-    },
-    {
-      label: 'FC attitude',
-      value: telemetry.imu?.ready ? 'Live' : 'Waiting',
-      detail: telemetry.imu?.ready
-        ? `Pitch ${formatNumber(telemetry.imu.pitch, 1)} / Roll ${formatNumber(telemetry.imu.roll, 1)} deg`
-        : 'No flight-controller attitude yet',
-      tone: telemetry.imu?.ready ? 'ready' : 'blocked',
-    },
-    {
-      label: '1S battery',
-      value: batteryReady ? `${formatNumber(batteryVoltage, 2)} V` : 'Waiting',
-      detail: batteryReady
-        ? `${batteryLabel} / ${batteryPercentLabel} / ${formatNumber(batteryCurrent, 2)} A`
-        : 'No CRSF battery frame yet',
-      tone: batteryTone,
-    },
-    {
-      label: 'Logging',
-      value: loggingSessionLabel,
-      detail: latestMetricsLogName,
-      tone: system.loggingActive ? 'ready' : 'pending',
     },
   ];
   const allPrimaryLinksReady = (
@@ -1700,6 +1513,30 @@ function App() {
                     </label>
                   </div>
                 </div>
+
+                <div className="pid-loops-grid">
+                  <section className="loop-section">
+                    <div className="loop-head">
+                      <div>
+                        <span className="meta-label">PID tuning</span>
+                        <strong>World-frame position, heading, and velocity</strong>
+                      </div>
+                    </div>
+                    <div className="pid-card-grid">
+                      {outerLoopCards.map((card) => (
+                        <PidAxisCard
+                          key={card.id}
+                          tone="outer"
+                          axisLabel={card.axisLabel}
+                          title={card.title}
+                          pid={localControl.pid[card.pidAxis] ?? DEFAULT_PID[card.pidAxis]}
+                          step={card.step}
+                          onChange={(term, value) => updatePidValue(card.pidAxis, term, value)}
+                        />
+                      ))}
+                    </div>
+                  </section>
+                </div>
               </DisclosureSection>
 
               <DisclosureSection label="Service tools" title="Logging and IMU calibration">
@@ -1754,11 +1591,8 @@ function App() {
             <div className="panel-heading">
               <div>
                 <p className="panel-label">Live state</p>
-                <h2>Flight and tracking at a glance</h2>
+                <h2>Pose and battery</h2>
               </div>
-              <span className={`mini-badge ${telemetry.spatial_data_valid ? 'ready' : 'blocked'}`}>
-                {telemetry.spatial_data_valid ? 'Tracking valid' : 'Tracking invalid'}
-              </span>
             </div>
 
             <div className="metric-grid metric-grid-live">
@@ -1794,57 +1628,6 @@ function App() {
                 </div>
               </div>
             </div>
-
-            <div className="pid-summary-grid">
-              {snapshotCards.map((card) => (
-                <SnapshotCard key={card.label} {...card} />
-              ))}
-            </div>
-
-            <DisclosureSection label="Tracking quality" title="Solver detail and LED coordinates">
-              <div className="meta-row">
-                <div>
-                  <span className="meta-label">Legacy solver error</span>
-                  <strong>{formatNumber(telemetry.error, 5)}</strong>
-                </div>
-                <div>
-                  <span className="meta-label">Mapping error</span>
-                  <strong>{formatNumber(telemetry.mapping_error_px, 5)} px</strong>
-                </div>
-                <div>
-                  <span className="meta-label">Model fit</span>
-                  <strong>{formatNumber(telemetry.model_fit_error_m, 5)} m</strong>
-                </div>
-                <div>
-                  <span className="meta-label">LED model scale</span>
-                  <strong>{formatNumber(telemetry.scale_factor, 5)}x</strong>
-                </div>
-              </div>
-
-              <div className="meta-row">
-                <div>
-                  <span className="meta-label">LEDs per camera</span>
-                  <strong>{telemetry.detected_leds_per_camera.join(' / ')}</strong>
-                </div>
-                <div>
-                  <span className="meta-label">Camera IDs</span>
-                  <strong>{system.cameraIds.length ? system.cameraIds.join(', ') : 'Unavailable'}</strong>
-                </div>
-              </div>
-
-              <div className="led-coords">
-                <span className="meta-label">Solved LED coordinates (world)</span>
-                {telemetry.solved_led_coordinates?.length ? (
-                  telemetry.solved_led_coordinates.map((led) => (
-                    <strong key={led.label}>
-                      {led.label}: ({formatNumber(led.x, 4)}, {formatNumber(led.y, 4)}, {formatNumber(led.z, 4)})
-                    </strong>
-                  ))
-                ) : (
-                  <strong>No solved points</strong>
-                )}
-              </div>
-            </DisclosureSection>
           </article>
 
           <article className="panel panel-scene">
@@ -1854,7 +1637,7 @@ function App() {
                 <h2>Live flight trends</h2>
               </div>
             </div>
-            <TrajectoryPanel telemetry={telemetry} samples={trajectorySamples} />
+            <TrajectoryPanel telemetry={telemetry} samples={trajectorySamples} target={localControl.target} />
           </article>
 
           <article className="panel panel-cameras">
@@ -1900,68 +1683,6 @@ function App() {
             <CameraPoseScene cameraPoses={system.cameraPoses} telemetry={telemetry} />
           </article>
 
-          <details className="panel disclosure-panel panel-pid">
-            <summary className="panel-summary">
-              <div>
-                <p className="panel-label">Advanced</p>
-                <h2>PID tuning</h2>
-              </div>
-              <span className={`mini-badge ${isDirty ? 'pending' : 'clean'}`}>
-                {isDirty ? 'Pending changes' : 'Synced'}
-              </span>
-            </summary>
-
-            <div className="panel-body">
-              <div className="panel-actions panel-actions-inline">
-                <button className="ghost-button" onClick={captureCurrentPoseAsTarget}>
-                  Use current pose
-                </button>
-                <button className="primary-button" onClick={() => applyControl()}>
-                  Apply tuning
-                </button>
-              </div>
-
-              <div className="pid-summary-grid">
-                {snapshotCards.map((card) => (
-                  <SnapshotCard key={card.label} {...card} />
-                ))}
-              </div>
-
-              <div className="pid-loops-grid">
-                <section className="loop-section">
-                  <div className="loop-head">
-                    <div>
-                      <span className="meta-label">Outer loop</span>
-                      <strong>World-frame position, heading, and velocity</strong>
-                    </div>
-                  </div>
-                  <div className="pid-card-grid">
-                    {outerLoopCards.map((card) => (
-                      <PidAxisCard
-                        key={card.id}
-                        tone="outer"
-                        axisLabel={card.axisLabel}
-                        title={card.title}
-                        pid={localControl.pid[card.pidAxis] ?? DEFAULT_PID[card.pidAxis]}
-                        step={card.step}
-                        liveLabel={card.liveLabel}
-                        liveValue={card.liveValue}
-                        liveDigits={card.liveDigits}
-                        targetLabel={card.targetLabel}
-                        targetValue={card.targetValue}
-                        targetDigits={card.targetDigits}
-                        errorLabel={card.errorLabel}
-                        errorValue={card.errorValue}
-                        errorDigits={card.errorDigits}
-                        unit={card.unit}
-                        onChange={(term, value) => updatePidValue(card.pidAxis, term, value)}
-                      />
-                    ))}
-                  </div>
-                </section>
-              </div>
-            </div>
-          </details>
         </section>
       </main>
     </div>
