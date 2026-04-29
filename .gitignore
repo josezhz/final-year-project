@@ -15,3 +15,8 @@ env/
 
 .DS_Store
 Thumbs.db
+
+# Local capture/output artifacts
+backend/data_logs/
+backend/calibration/calib_img/
+*.log
