@@ -71,7 +71,7 @@ MOTION_STATE_MAX_DT = 0.25
 MOTION_STATE_MAX_ABS_VELOCITY = 2.5
 
 CONTROL_PID_DEFAULTS = {
-    "xyPos": {"kp": 10.0, "ki": 0.25, "kd": 0.0},
+    "xyPos": {"kp": 10.0, "ki": 0.05, "kd": 0.0},
     "zPos": {"kp": 1.2, "ki": 0.0, "kd": 0.0},
     "yawPos": {"kp": 1.2, "ki": 0.0, "kd": 0.0},
     "xyVel": {"kp": 0.9, "ki": 0.0, "kd": 0.0},
@@ -95,6 +95,9 @@ CONTROL_LOG_COLUMNS = [
     "target_z_m",
     "target_yaw_deg",
     "limit_hover_throttle",
+    "limit_effective_hover_throttle",
+    "limit_hover_battery_cell_v",
+    "limit_hover_battery_scale",
     "limit_min_throttle",
     "limit_max_throttle",
     "limit_max_tilt_deg",
@@ -115,6 +118,12 @@ CONTROL_LIMIT_DEFAULTS = {
     "maxTiltDeg": 8.0,
     "maxYawRateDeg": 180.0,
 }
+BATTERY_HOVER_REFERENCE_CELL_VOLTAGE = 3.70
+BATTERY_HOVER_MIN_CELL_VOLTAGE = 3.30
+BATTERY_HOVER_MAX_CELL_VOLTAGE = 4.35
+BATTERY_HOVER_COMPENSATION_EXPONENT = 2.0
+BATTERY_HOVER_MIN_SCALE = 0.70
+BATTERY_HOVER_MAX_SCALE = 1.25
 # Body model uses the same mocap frame: +x front, +y left, +z up.
 DRONE_LED_MODEL = np.array(
     [
@@ -617,15 +626,64 @@ def sanitize_limit_config(payload):
     return sanitized
 
 
+def build_battery_hover_compensation(limits=None, battery=None):
+    limits = sanitize_limit_config(limits)
+    battery = sanitize_battery_telemetry(battery)
+    effective_limits = copy.deepcopy(limits)
+
+    base_hover = limits["hoverThrottle"]
+    cell_voltage = coerce_float(
+        battery.get("cell_voltage", battery.get("voltage", 0.0)),
+        0.0,
+    )
+    metadata = {
+        "enabled": False,
+        "baseHoverThrottle": round(base_hover, 4),
+        "effectiveHoverThrottle": round(base_hover, 4),
+        "cellVoltage": round(cell_voltage, 3),
+        "referenceCellVoltage": BATTERY_HOVER_REFERENCE_CELL_VOLTAGE,
+        "scale": 1.0,
+    }
+    if not battery.get("ready", False) or cell_voltage <= 0.0:
+        return effective_limits, metadata
+
+    compensated_voltage = max(
+        BATTERY_HOVER_MIN_CELL_VOLTAGE,
+        min(cell_voltage, BATTERY_HOVER_MAX_CELL_VOLTAGE),
+    )
+    scale = (BATTERY_HOVER_REFERENCE_CELL_VOLTAGE / compensated_voltage) ** (
+        BATTERY_HOVER_COMPENSATION_EXPONENT
+    )
+    scale = max(BATTERY_HOVER_MIN_SCALE, min(scale, BATTERY_HOVER_MAX_SCALE))
+    effective_hover = max(
+        limits["minThrottle"],
+        min(base_hover * scale, limits["maxThrottle"]),
+    )
+    effective_limits["hoverThrottle"] = effective_hover
+    metadata.update(
+        {
+            "enabled": True,
+            "effectiveHoverThrottle": round(effective_hover, 4),
+            "compensatedCellVoltage": round(compensated_voltage, 3),
+            "scale": round(scale, 4),
+        }
+    )
+    return effective_limits, metadata
+
+
 def get_control_field(control_state, field, default):
     if isinstance(control_state, dict):
         return control_state.get(field, default)
     return getattr(control_state, field, default)
 
 
-def build_control_log_values(control_state=None):
+def build_control_log_values(control_state=None, battery=None):
     target = sanitize_target_config(get_control_field(control_state, "target", {}))
     limits = sanitize_limit_config(get_control_field(control_state, "limits", {}))
+    effective_limits, hover_compensation = build_battery_hover_compensation(
+        limits,
+        battery,
+    )
     pid = sanitize_pid_config(get_control_field(control_state, "pid", {}))
 
     values = [
@@ -636,6 +694,9 @@ def build_control_log_values(control_state=None):
         f"{target['z']:.4f}",
         f"{target['yaw']:.2f}",
         f"{limits['hoverThrottle']:.4f}",
+        f"{effective_limits['hoverThrottle']:.4f}",
+        f"{coerce_float(hover_compensation.get('cellVoltage'), 0.0):.3f}",
+        f"{coerce_float(hover_compensation.get('scale'), 1.0):.4f}",
         f"{limits['minThrottle']:.4f}",
         f"{limits['maxThrottle']:.4f}",
         f"{limits['maxTiltDeg']:.2f}",
@@ -1510,7 +1571,10 @@ class ExperimentMetricsLogger:
         motor_outputs = controller_metrics.get("motor_outputs", [0.0, 0.0, 0.0, 0.0])
         imu_values = build_imu_log_values(imu_sample, mocap_sample)
         battery_values = build_battery_log_values(telemetry.get("battery", {}))
-        control_values = build_control_log_values(control_state)
+        control_values = build_control_log_values(
+            control_state,
+            telemetry.get("battery", {}),
+        )
         timestamp = datetime.fromtimestamp(sample_time).isoformat(timespec="milliseconds")
         elapsed = max(0.0, float(sample_time) - self.started_at)
 
@@ -2418,6 +2482,12 @@ class ControlServer:
         self.metrics_log_path = None
         self.state_lock = asyncio.Lock()
 
+    def get_effective_control_limits(self):
+        return build_battery_hover_compensation(
+            self.control.limits,
+            self.telemetry.get("battery", {}),
+        )
+
     def build_mocap_log_sample(self, telemetry=None, yaw_rate=0.0):
         telemetry = telemetry if isinstance(telemetry, dict) else {}
         position = telemetry.get("position", {})
@@ -2563,8 +2633,9 @@ class ControlServer:
         return True
 
     def get_safe_landing_target_throttle(self):
+        effective_limits, _ = self.get_effective_control_limits()
         hover_throttle = coerce_float(
-            self.control.limits.get("hoverThrottle"),
+            effective_limits.get("hoverThrottle"),
             CONTROL_LIMIT_DEFAULTS["hoverThrottle"],
         )
         target_throttle = min(
@@ -2623,6 +2694,7 @@ class ControlServer:
         imu_level_pending = self.is_imu_level_calibration_pending()
         safe_landing_requested = self.safe_landing_requested and self.control.armed
         safe_landing_throttle = self.get_safe_landing_target_throttle()
+        effective_limits, _ = self.get_effective_control_limits()
         self.serial_payload_sequence += 1
         payload_sequence = int(self.serial_payload_sequence)
 
@@ -2662,11 +2734,11 @@ class ControlServer:
                 ],
                 "u": compact_pid_bundle(self.control.pid, pid_digits),
                 "m": [
-                    compact_numeric(self.control.limits["hoverThrottle"], throttle_digits),
-                    compact_numeric(self.control.limits["minThrottle"], throttle_digits),
-                    compact_numeric(self.control.limits["maxThrottle"], throttle_digits),
-                    compact_numeric(self.control.limits["maxTiltDeg"], angle_limit_digits),
-                    compact_numeric(self.control.limits["maxYawRateDeg"], angle_limit_digits),
+                    compact_numeric(effective_limits["hoverThrottle"], throttle_digits),
+                    compact_numeric(effective_limits["minThrottle"], throttle_digits),
+                    compact_numeric(effective_limits["maxThrottle"], throttle_digits),
+                    compact_numeric(effective_limits["maxTiltDeg"], angle_limit_digits),
+                    compact_numeric(effective_limits["maxYawRateDeg"], angle_limit_digits),
                 ],
                 "s": payload_sequence,
             }
@@ -2727,6 +2799,7 @@ class ControlServer:
         )
         serial_ready = self.serial_bridge.is_connected()
         serial_send_enabled = self.control.active and serial_ready
+        effective_limits, hover_compensation = self.get_effective_control_limits()
         if self.is_logging_active():
             vision_metrics = self.get_session_vision_metrics()
             bridge_metrics = self.get_session_bridge_metrics()
@@ -2744,6 +2817,8 @@ class ControlServer:
                 "baudRate": self.control.baud_rate,
                 "target": self.control.target,
                 "limits": self.control.limits,
+                "effectiveLimits": effective_limits,
+                "hoverCompensation": hover_compensation,
                 "pid": self.control.pid,
             },
             "telemetry": self.telemetry,
