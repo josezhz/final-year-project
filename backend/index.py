@@ -72,10 +72,10 @@ MOTION_STATE_MAX_ABS_VELOCITY = 2.5
 
 CONTROL_PID_DEFAULTS = {
     "xyPos": {"kp": 10.0, "ki": 0.05, "kd": 0.0},
-    "zPos": {"kp": 1.2, "ki": 0.0, "kd": 0.0},
+    "zPos": {"kp": 1.5, "ki": 0.20, "kd": 0.0},
     "yawPos": {"kp": 1.2, "ki": 0.0, "kd": 0.0},
-    "xyVel": {"kp": 0.9, "ki": 0.0, "kd": 0.0},
-    "zVel": {"kp": 0.85, "ki": 0.04, "kd": 0.0},
+    "xyVel": {"kp": 1.5, "ki": 0.0, "kd": 0.0},
+    "zVel": {"kp": 0.85, "ki": 0.10, "kd": 0.0},
 }
 CONTROL_LOG_PID_AXES = tuple(CONTROL_PID_DEFAULTS.keys())
 CONTROL_LOG_PID_TERMS = ("kp", "ki", "kd")
@@ -112,7 +112,7 @@ CONTROL_LOG_COLUMNS = [
 # the drone's nose should stay aligned with the world +x direction.
 CONTROL_TARGET_DEFAULTS = {"x": 0.0, "y": 0.0, "z": 0.35, "yaw": -90.0}
 CONTROL_LIMIT_DEFAULTS = {
-    "hoverThrottle": 0.76,
+    "hoverThrottle": 0.79,
     "minThrottle": 0.42,
     "maxThrottle": 1.00,
     "maxTiltDeg": 8.0,
@@ -121,9 +121,9 @@ CONTROL_LIMIT_DEFAULTS = {
 BATTERY_HOVER_REFERENCE_CELL_VOLTAGE = 3.70
 BATTERY_HOVER_MIN_CELL_VOLTAGE = 3.30
 BATTERY_HOVER_MAX_CELL_VOLTAGE = 4.35
-BATTERY_HOVER_COMPENSATION_EXPONENT = 2.0
+BATTERY_HOVER_COMPENSATION_EXPONENT = 1.5
 BATTERY_HOVER_MIN_SCALE = 0.70
-BATTERY_HOVER_MAX_SCALE = 1.25
+BATTERY_HOVER_MAX_SCALE = 1.10
 # Body model uses the same mocap frame: +x front, +y left, +z up.
 DRONE_LED_MODEL = np.array(
     [
