@@ -63,18 +63,18 @@ POSITION_JUMP_WEIGHT = 2.0
 PREVIEW_HZ = 5
 MAX_ESP_NOW_PAYLOAD_BYTES = 250
 IMU_LEVEL_CALIBRATION_RETRY_SECONDS = 1.0
-MOTION_STATE_PROCESS_NOISE = 5e-2
+MOTION_STATE_PROCESS_NOISE = 1e-2
 MOTION_STATE_POSITION_MEASUREMENT_NOISE = 0.03
-MOTION_STATE_VELOCITY_MEASUREMENT_NOISE = 0.18
+MOTION_STATE_VELOCITY_MEASUREMENT_NOISE = 1.0
 MOTION_STATE_ZERO_THRESHOLD = 0.01
 MOTION_STATE_MAX_DT = 0.25
 MOTION_STATE_MAX_ABS_VELOCITY = 2.5
 
 CONTROL_PID_DEFAULTS = {
-    "xyPos": {"kp": 10.0, "ki": 0.05, "kd": 0.0},
+    "xyPos": {"kp": 10.0, "ki": 0.10, "kd": 0.0},
     "zPos": {"kp": 1.5, "ki": 0.20, "kd": 0.0},
     "yawPos": {"kp": 1.2, "ki": 0.0, "kd": 0.0},
-    "xyVel": {"kp": 1.5, "ki": 0.0, "kd": 0.0},
+    "xyVel": {"kp": 2.5, "ki": 0.0, "kd": 0.0},
     "zVel": {"kp": 0.85, "ki": 0.10, "kd": 0.0},
 }
 CONTROL_LOG_PID_AXES = tuple(CONTROL_PID_DEFAULTS.keys())
@@ -112,7 +112,7 @@ CONTROL_LOG_COLUMNS = [
 # the drone's nose should stay aligned with the world +x direction.
 CONTROL_TARGET_DEFAULTS = {"x": 0.0, "y": 0.0, "z": 0.35, "yaw": -90.0}
 CONTROL_LIMIT_DEFAULTS = {
-    "hoverThrottle": 0.79,
+    "hoverThrottle": 0.78,
     "minThrottle": 0.42,
     "maxThrottle": 1.00,
     "maxTiltDeg": 8.0,
