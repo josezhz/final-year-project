@@ -53,10 +53,13 @@ SERIAL_MAX_CONSECUTIVE_FAILURES = 3
 SERIAL_IMU_STALE_SECONDS = 0.5
 SERIAL_BATTERY_STALE_SECONDS = 2.0
 CAMERA_RETRY_SECONDS = 5.0
-SAFE_LANDING_TRACKING_LOSS_GRACE_SECONDS = 0.35
+SAFE_LANDING_TRACKING_LOSS_GRACE_SECONDS = 0.0
 SAFE_LANDING_DURATION_SECONDS = 5.0
-SAFE_LANDING_TARGET_THROTTLE = 0.50
 SAFE_LANDING_MIN_THROTTLE_DROP = 0.05
+LANDING_DESCENT_RATE_MPS = 0.20
+LANDING_TOUCHDOWN_THRESHOLD_M = 0.05
+LANDING_DISARM_GRACE_SECONDS = 0.5
+MAX_Z_VELOCITY_LIMIT_MPS = 0.10
 DEFAULT_BAUD_RATE = 1000000
 DEFAULT_DRONE_INDEX = 0
 POSITION_JUMP_WEIGHT = 2.0
@@ -72,10 +75,10 @@ MOTION_STATE_MAX_ABS_VELOCITY = 2.5
 
 CONTROL_PID_DEFAULTS = {
     "xyPos": {"kp": 10.0, "ki": 0.10, "kd": 0.0},
-    "zPos": {"kp": 1.5, "ki": 0.20, "kd": 0.0},
+    "zPos": {"kp": 0.5, "ki": 0.0, "kd": 0.2},
     "yawPos": {"kp": 1.2, "ki": 0.0, "kd": 0.0},
     "xyVel": {"kp": 2.5, "ki": 0.0, "kd": 0.0},
-    "zVel": {"kp": 0.85, "ki": 0.10, "kd": 0.0},
+    "zVel": {"kp": 0.8, "ki": 0.0, "kd": 0.1},
 }
 CONTROL_LOG_PID_AXES = tuple(CONTROL_PID_DEFAULTS.keys())
 CONTROL_LOG_PID_TERMS = ("kp", "ki", "kd")
@@ -110,9 +113,9 @@ CONTROL_LOG_COLUMNS = [
 ]
 # Mocap/body frame is +x front, +y left, +z up. A yaw target of 0 deg means
 # the drone's nose should stay aligned with the world +x direction.
-CONTROL_TARGET_DEFAULTS = {"x": 0.0, "y": 0.0, "z": 0.35, "yaw": -90.0}
+CONTROL_TARGET_DEFAULTS = {"x": 0.0, "y": 0.0, "z": 0.35, "yaw": 0.0}
 CONTROL_LIMIT_DEFAULTS = {
-    "hoverThrottle": 0.78,
+    "hoverThrottle": 0.75,
     "minThrottle": 0.42,
     "maxThrottle": 1.00,
     "maxTiltDeg": 8.0,
@@ -2465,6 +2468,11 @@ class ControlServer:
         self.safe_landing_requested = False
         self.safe_landing_requested_at = 0.0
         self.safe_landing_reason = ""
+        self.landing_active = False
+        self.landing_phase = "idle"
+        self.landing_started_at = 0.0
+        self.landing_initial_target_z = 0.0
+        self.landing_touchdown_at = 0.0
         self.latest_mocap_log_sample = self.build_mocap_log_sample()
         self.last_mocap_yaw_unwrapped = None
         self.last_mocap_yaw_timestamp = 0.0
@@ -2638,11 +2646,7 @@ class ControlServer:
             effective_limits.get("hoverThrottle"),
             CONTROL_LIMIT_DEFAULTS["hoverThrottle"],
         )
-        target_throttle = min(
-            SAFE_LANDING_TARGET_THROTTLE,
-            hover_throttle - SAFE_LANDING_MIN_THROTTLE_DROP,
-        )
-        return max(0.0, min(target_throttle, 1.0))
+        return max(0.0, min(hover_throttle - SAFE_LANDING_MIN_THROTTLE_DROP, 1.0))
 
     def reset_safe_landing_state(self):
         self.safe_landing_tracking_lost_since = 0.0
@@ -2685,6 +2689,92 @@ class ControlServer:
             "reason": self.safe_landing_reason,
         }
 
+    def reset_landing_state(self):
+        self.landing_active = False
+        self.landing_phase = "idle"
+        self.landing_started_at = 0.0
+        self.landing_initial_target_z = 0.0
+        self.landing_touchdown_at = 0.0
+
+    def start_landing(self, sample_time=None):
+        if not (self.control.active and self.control.armed):
+            return False
+        if self.landing_active:
+            return True
+        sample_time = float(sample_time or time.time())
+        self.landing_active = True
+        self.landing_phase = "descending"
+        self.landing_started_at = sample_time
+        self.landing_initial_target_z = float(self.control.target.get("z", 0.0))
+        self.landing_touchdown_at = 0.0
+        return True
+
+    def cancel_landing(self):
+        if not self.landing_active:
+            return
+        was_touchdown = self.safe_landing_reason == "landing_touchdown"
+        self.reset_landing_state()
+        if was_touchdown:
+            self.reset_safe_landing_state()
+
+    def update_landing_state(self, sample_time=None):
+        if not self.landing_active:
+            return
+        if not (self.control.active and self.control.armed):
+            self.reset_landing_state()
+            return
+        sample_time = float(sample_time or time.time())
+
+        if self.landing_phase == "descending":
+            elapsed = max(0.0, sample_time - self.landing_started_at)
+            new_target_z = max(
+                0.0,
+                self.landing_initial_target_z - LANDING_DESCENT_RATE_MPS * elapsed,
+            )
+            self.control.target["z"] = new_target_z
+            if new_target_z <= LANDING_TOUCHDOWN_THRESHOLD_M:
+                self.landing_phase = "touchdown"
+                self.landing_touchdown_at = sample_time
+
+        if self.landing_phase == "touchdown":
+            self.control.target["z"] = 0.0
+            self.safe_landing_requested = True
+            self.safe_landing_requested_at = self.landing_touchdown_at
+            self.safe_landing_reason = "landing_touchdown"
+            elapsed_ramp = sample_time - self.landing_touchdown_at
+            if elapsed_ramp >= SAFE_LANDING_DURATION_SECONDS + LANDING_DISARM_GRACE_SECONDS:
+                self.landing_phase = "completed"
+                self.control.armed = False
+                self.reset_landing_state()
+                self.reset_safe_landing_state()
+
+    def build_landing_status(self):
+        return {
+            "active": self.landing_active,
+            "phase": self.landing_phase,
+            "descentRateMps": LANDING_DESCENT_RATE_MPS,
+            "initialTargetZ": round(self.landing_initial_target_z, 3),
+            "currentTargetZ": round(float(self.control.target.get("z", 0.0)), 3),
+            "touchdownThresholdM": LANDING_TOUCHDOWN_THRESHOLD_M,
+            "rampDurationSeconds": SAFE_LANDING_DURATION_SECONDS,
+        }
+
+    def get_capped_target_z(self):
+        """Limit |target_z - actual_z| so the firmware's position-PID output
+        stays within ±MAX_Z_VELOCITY_LIMIT_MPS (since vz_cmd ≈ kp_zPos · error)."""
+        commanded_z = float(self.control.target.get("z", 0.0))
+        if not self.telemetry.get("spatial_data_valid", False):
+            return commanded_z
+        actual_z = coerce_float(self.telemetry.get("position", {}).get("z"), commanded_z)
+        kp_zPos = coerce_float(
+            self.control.pid.get("zPos", {}).get("kp"),
+            CONTROL_PID_DEFAULTS["zPos"]["kp"],
+        )
+        if kp_zPos <= 1e-6:
+            return commanded_z
+        max_error = MAX_Z_VELOCITY_LIMIT_MPS / kp_zPos
+        return max(actual_z - max_error, min(commanded_z, actual_z + max_error))
+
     def build_serial_payload(self):
         spatial_data_valid = self.telemetry["spatial_data_valid"]
         drone_index = DEFAULT_DRONE_INDEX
@@ -2695,6 +2785,7 @@ class ControlServer:
         safe_landing_requested = self.safe_landing_requested and self.control.armed
         safe_landing_throttle = self.get_safe_landing_target_throttle()
         effective_limits, _ = self.get_effective_control_limits()
+        capped_target_z = self.get_capped_target_z()
         self.serial_payload_sequence += 1
         payload_sequence = int(self.serial_payload_sequence)
 
@@ -2729,7 +2820,7 @@ class ControlServer:
                 "g": [
                     compact_numeric(self.control.target["x"], target_digits),
                     compact_numeric(self.control.target["y"], target_digits),
-                    compact_numeric(self.control.target["z"], target_digits),
+                    compact_numeric(capped_target_z, target_digits),
                     compact_numeric(self.control.target["yaw"], target_yaw_digits),
                 ],
                 "u": compact_pid_bundle(self.control.pid, pid_digits),
@@ -2843,6 +2934,9 @@ class ControlServer:
                 "lastSerialSendOk": self.last_serial_send_ok,
                 "lastSerialSendError": self.last_serial_send_error,
                 "safeLanding": self.build_safe_landing_status(),
+                "landing": self.build_landing_status(),
+                "cappedTargetZ": round(float(self.get_capped_target_z()), 3),
+                "maxZVelocityLimitMps": MAX_Z_VELOCITY_LIMIT_MPS,
                 "imuLevelCalibrationPending": self.is_imu_level_calibration_pending(),
                 "imuLevelCalibrationSent": self.imu_level_calibration_sent,
                 "imuLevelCalibrationSequence": self.imu_level_calibration_sequence,
@@ -2931,6 +3025,10 @@ class ControlServer:
                     self.queue_imu_level_calibration()
                 elif message_type == "toggle_logging_session":
                     self.toggle_logging_session()
+                elif message_type == "request_land":
+                    self.start_landing()
+                elif message_type == "cancel_land":
+                    self.cancel_landing()
         except Exception as exc:
             self.serial_bridge.last_error = f"Control message handling failed: {exc}"
             print(f"Control message handling failed: {exc}")
@@ -3001,6 +3099,7 @@ class ControlServer:
                         )
                         self.update_mocap_log_sample(self.telemetry, time.time())
                     self.update_safe_landing_state(time.time())
+                    self.update_landing_state(time.time())
                     imu_level_pending = self.is_imu_level_calibration_pending()
                     should_send_serial = (
                         (self.control.active and self.serial_bridge.is_connected())

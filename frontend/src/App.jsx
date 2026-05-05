@@ -993,6 +993,14 @@ function App() {
     sendMessage({ type: 'toggle_logging_session' });
   };
 
+  const requestLand = () => {
+    sendMessage({ type: 'request_land' });
+  };
+
+  const cancelLand = () => {
+    sendMessage({ type: 'cancel_land' });
+  };
+
   const isDirty = JSON.stringify(localControl) !== JSON.stringify(serverControl);
   const livePosition = {
     x: Number(telemetry.position?.x ?? 0),
@@ -1376,6 +1384,18 @@ function App() {
                 onClick={toggleArm}
               >
                 {localControl.armed ? 'Disarm motors' : 'Arm motors'}
+              </button>
+              <button
+                className={`toggle-button toggle-button-land ${system.landing?.active ? 'active' : ''}`}
+                onClick={system.landing?.active ? cancelLand : requestLand}
+                disabled={!system.landing?.active && !localControl.armed}
+                title={
+                  system.landing?.active
+                    ? `Landing (${system.landing.phase}) — currentTargetZ=${system.landing.currentTargetZ ?? '?'}m`
+                    : 'Lower target Z to 0 at 0.10 m/s, then ramp throttle and disarm'
+                }
+              >
+                {system.landing?.active ? `Cancel landing (${system.landing.phase})` : 'Land'}
               </button>
               <button className="ghost-button" onClick={captureCurrentPoseAsTarget}>
                 Use current pose
