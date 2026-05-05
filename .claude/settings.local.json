@@ -1,9 +1,0 @@
-{
-  "permissions": {
-    "allow": [
-      "Bash(python)",
-      "Bash(python backend/data_logs/_analyze.py)",
-      "Bash(python -c ' *)"
-    ]
-  }
-}
