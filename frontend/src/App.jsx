@@ -1186,32 +1186,26 @@ function App() {
     {
       label: 'Position X',
       value: `${formatNumber(livePosition.x)} m`,
-      detail: 'World forward axis',
-    },
-    {
-      label: 'Position Y',
-      value: `${formatNumber(livePosition.y)} m`,
-      detail: 'World left-right axis',
-    },
-    {
-      label: 'Position Z',
-      value: `${formatNumber(livePosition.z)} m`,
-      detail: 'Height above origin',
-    },
-    {
-      label: 'Yaw',
-      value: `${formatNumber(liveRotation.yaw, 2)} deg`,
-      detail: 'Heading',
     },
     {
       label: 'Pitch',
       value: `${formatNumber(liveRotation.pitch, 2)} deg`,
-      detail: 'Fore-aft tilt',
+    },
+    {
+      label: 'Position Y',
+      value: `${formatNumber(livePosition.y)} m`,
     },
     {
       label: 'Roll',
       value: `${formatNumber(liveRotation.roll, 2)} deg`,
-      detail: 'Side-to-side tilt',
+    },
+    {
+      label: 'Position Z',
+      value: `${formatNumber(livePosition.z)} m`,
+    },
+    {
+      label: 'Yaw',
+      value: `${formatNumber(liveRotation.yaw, 2)} deg`,
     },
   ];
   const allPrimaryLinksReady = (
@@ -1257,9 +1251,25 @@ function App() {
     <div className="app-shell">
       <main className="dashboard">
         <section className="hero">
-          <div>
+          <div className="hero-intro">
             <p className="eyebrow">Operator console</p>
-            <h1>Hover control dashboard</h1>
+            <h1>Mocap Drone Control</h1>
+            <p className="hero-subtitle">
+              Live motion-capture pose, flight controller telemetry, and hover command stream in one view.
+            </p>
+            <div className="hero-meta">
+              <span className={`mini-badge ${connectionState === 'Connected' ? 'ready' : connectionState === 'Connecting' ? 'pending' : 'blocked'}`}>
+                {connectionState}
+              </span>
+              <span className="hero-meta-divider" aria-hidden="true">·</span>
+              <span className="hero-meta-text">
+                {system.connectedCameras}/{system.expectedCameras} cameras
+              </span>
+              <span className="hero-meta-divider" aria-hidden="true">·</span>
+              <span className="hero-meta-text">
+                {serverControl.armed ? 'Motors armed' : 'Motors safe'}
+              </span>
+            </div>
           </div>
 
           <div className="hero-status-grid">
@@ -1620,7 +1630,6 @@ function App() {
                 <div key={card.label} className={`metric-card ${card.tone ?? ''}`.trim()}>
                   <span>{card.label}</span>
                   <strong>{card.value}</strong>
-                  <small>{card.detail}</small>
                 </div>
               ))}
             </div>
