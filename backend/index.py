@@ -44,7 +44,7 @@ MAX_TRACKING_CAMERAS = 3
 MIN_BRIGHTNESS = 50
 MAX_LEDS = 3
 MAX_FIT_ERROR = 0.05
-TRACKING_HZ = 60
+TRACKING_HZ = 120
 SERIAL_REFRESH_SECONDS = 1.0
 SERIAL_RECONNECT_SECONDS = 1.0
 SERIAL_SETTLE_SECONDS = 2.0
@@ -2605,40 +2605,12 @@ class ControlServer:
             self.logging_status = "Logging session stopped."
         return True
 
-    def toggle_logging_session(self):
-        if self.is_logging_active():
-            return self.stop_logging_session()
-        return self.start_logging_session()
-
     def is_imu_level_calibration_pending(self):
         if self.imu_level_calibration_sequence <= 0:
             return False
         return (
             time.time() - self.imu_level_calibration_requested_at
         ) < IMU_LEVEL_CALIBRATION_RETRY_SECONDS
-
-    def queue_imu_level_calibration(self):
-        if self.control.armed:
-            self.imu_level_calibration_sent = False
-            self.imu_level_calibration_status = (
-                "Disarm motors before calibrating the IMU level."
-            )
-            return False
-
-        if not self.control.serial_port:
-            self.imu_level_calibration_sent = False
-            self.imu_level_calibration_status = (
-                "Select a serial port before calibrating the IMU level."
-            )
-            return False
-
-        self.imu_level_calibration_sequence += 1
-        self.imu_level_calibration_requested_at = time.time()
-        self.imu_level_calibration_sent = False
-        self.imu_level_calibration_status = (
-            "Queued. Hold the drone level and still."
-        )
-        return True
 
     def get_safe_landing_target_throttle(self):
         effective_limits, _ = self.get_effective_control_limits()
@@ -3019,12 +2991,6 @@ class ControlServer:
                         self.stop_logging_session(
                             status_message="Logging stopped when disarmed."
                         )
-                elif message_type == "refresh_serial_ports":
-                    self.serial_bridge.refresh_ports(force=True)
-                elif message_type == "calibrate_imu_level":
-                    self.queue_imu_level_calibration()
-                elif message_type == "toggle_logging_session":
-                    self.toggle_logging_session()
                 elif message_type == "request_land":
                     self.start_landing()
                 elif message_type == "cancel_land":

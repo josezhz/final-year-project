@@ -67,48 +67,12 @@ const EMPTY_SYSTEM = {
   serialForwarding: false,
   lastSerialSendOk: false,
   lastSerialSendError: '',
-  imuLevelCalibrationPending: false,
-  imuLevelCalibrationSent: false,
-  imuLevelCalibrationSequence: 0,
-  imuLevelCalibrationStatus: '',
-  loggingActive: false,
-  loggingStatus: '',
-  metricsLogPath: '',
 };
 
 const TRAJECTORY_WINDOW_MS = 3000;
 
 function formatNumber(value, digits = 3) {
   return Number(value ?? 0).toFixed(digits);
-}
-
-function getBatteryTone(voltage, ready) {
-  if (!ready || voltage <= 0) {
-    return 'blocked';
-  }
-  if (voltage < 3.4) {
-    return 'blocked';
-  }
-  if (voltage < 3.5) {
-    return 'pending';
-  }
-  return 'ready';
-}
-
-function getBatteryLabel(voltage, ready) {
-  if (!ready || voltage <= 0) {
-    return 'Unavailable';
-  }
-  if (voltage < 3.4) {
-    return 'Critical';
-  }
-  if (voltage < 3.5) {
-    return 'Low';
-  }
-  if (voltage >= 4.1) {
-    return 'Full';
-  }
-  return 'Normal';
 }
 
 function buildLinePath(points, getX, getY) {
@@ -237,15 +201,7 @@ function CameraPoseScene({ cameraPoses, telemetry }) {
   const gridSize = Math.max(2, Math.ceil(extent * 4));
 
   return (
-    <div className="chart-card">
-      <div className="chart-heading">
-        <div>
-          <span className="meta-label">Extrinsics</span>
-          <strong>3D camera pose view</strong>
-        </div>
-        <span className="chart-window">{cameraPoints.length ? `${cameraPoints.length} cameras` : 'Waiting for poses'}</span>
-      </div>
-
+    <>
       <div className="scene-canvas-shell" role="img" aria-label="Interactive 3D camera pose scene">
         <Canvas camera={{ position: [1.8, -1.8, 1.3], fov: 42 }}>
           <color attach="background" args={['#0c1526']} />
@@ -323,7 +279,7 @@ function CameraPoseScene({ cameraPoses, telemetry }) {
           <strong>{telemetry.spatial_data_valid ? 'Tracking valid' : 'Tracking invalid'}</strong>
         </div>
       </div>
-    </div>
+    </>
   );
 }
 
@@ -446,21 +402,6 @@ function XYTrajectoryChart({ samples, telemetry, target }) {
           Y ({formatNumber(domain.yMin, 2)} to {formatNumber(domain.yMax, 2)})
         </text>
       </svg>
-
-      <div className="chart-readout">
-        <div>
-          <span className="meta-label">Latest X</span>
-          <strong>{formatNumber(telemetry.position.x)}</strong>
-        </div>
-        <div>
-          <span className="meta-label">Latest Y</span>
-          <strong>{formatNumber(telemetry.position.y)}</strong>
-        </div>
-        <div>
-          <span className="meta-label">Yaw</span>
-          <strong>{formatNumber(telemetry.rotation.yaw, 2)} deg</strong>
-        </div>
-      </div>
     </div>
   );
 }
@@ -555,17 +496,6 @@ function ZTimelineChart({ samples, telemetry, target }) {
           Z ({formatNumber(domainMin, 2)} to {formatNumber(domainMax, 2)})
         </text>
       </svg>
-
-      <div className="chart-readout">
-        <div>
-          <span className="meta-label">Latest Z</span>
-          <strong>{formatNumber(telemetry.position.z)}</strong>
-        </div>
-        <div>
-          <span className="meta-label">Target Z</span>
-          <strong>{formatNumber(targetZ)}</strong>
-        </div>
-      </div>
     </div>
   );
 }
@@ -670,19 +600,6 @@ function DualMetricTimelineChart({
           {yLabel} ({formatNumber(domain.min, 1)} to {formatNumber(domain.max, 1)})
         </text>
       </svg>
-
-      <div className="chart-readout">
-        {series.map((item) => (
-          <div key={item.key}>
-            <span className="meta-label">{item.label}</span>
-            <strong>
-              {formatNumber(item.getTelemetryValue(telemetryValues), item.digits)}
-              {' '}
-              {item.unit}
-            </strong>
-          </div>
-        ))}
-      </div>
     </div>
   );
 }
@@ -782,7 +699,6 @@ function TrajectoryPanel({ telemetry, samples, target }) {
 function PidAxisCard({
   tone,
   axisLabel,
-  title,
   pid,
   step,
   onChange,
@@ -792,7 +708,6 @@ function PidAxisCard({
       <div className="pid-axis-head">
         <div>
           <span className="meta-label">{axisLabel}</span>
-          <h3>{title}</h3>
         </div>
         <span className="axis-chip">Outer loop</span>
       </div>
@@ -812,30 +727,6 @@ function PidAxisCard({
       </div>
 
     </div>
-  );
-}
-
-function StatusCard({ label, value, detail, tone = 'pending' }) {
-  return (
-    <div className={`status-card ${tone}`}>
-      <span className="meta-label">{label}</span>
-      <strong>{value}</strong>
-      <small>{detail}</small>
-    </div>
-  );
-}
-
-function DisclosureSection({ label, title, defaultOpen = false, children }) {
-  return (
-    <details className="disclosure-section" open={defaultOpen}>
-      <summary className="disclosure-summary">
-        <div>
-          <span className="meta-label">{label}</span>
-          <strong>{title}</strong>
-        </div>
-      </summary>
-      <div className="disclosure-body">{children}</div>
-    </details>
   );
 }
 
@@ -878,7 +769,8 @@ function App() {
 
       setTelemetry(payload.telemetry);
       setSystem(payload.system);
-      setServerControl(payload.control);
+      const { effectiveLimits, hoverCompensation, ...userControl } = payload.control ?? {};
+      setServerControl(userControl);
       setTrajectorySamples((current) => {
         const now = Date.now();
         const next = [
@@ -889,6 +781,7 @@ function App() {
             x: Number(payload.telemetry.position?.x ?? 0),
             y: Number(payload.telemetry.position?.y ?? 0),
             z: Number(payload.telemetry.position?.z ?? 0),
+            yaw: Number(payload.telemetry.rotation?.yaw ?? 0),
             pitch: Number(imu.pitch ?? 0),
             roll: Number(imu.roll ?? 0),
             pitchRate: Number(imu.pitch_rate ?? 0),
@@ -901,7 +794,7 @@ function App() {
       });
 
       if (!hasInitialisedControl.current) {
-        setLocalControl(payload.control);
+        setLocalControl(userControl);
         hasInitialisedControl.current = true;
       }
     };
@@ -985,14 +878,6 @@ function App() {
     }));
   };
 
-  const requestImuLevelCalibration = () => {
-    sendMessage({ type: 'calibrate_imu_level' });
-  };
-
-  const toggleLoggingSession = () => {
-    sendMessage({ type: 'toggle_logging_session' });
-  };
-
   const requestLand = () => {
     sendMessage({ type: 'request_land' });
   };
@@ -1012,54 +897,6 @@ function App() {
     pitch: Number(telemetry.rotation?.pitch ?? 0),
     roll: Number(telemetry.rotation?.roll ?? 0),
   };
-  const battery = telemetry.battery ?? {};
-  const batteryReady = Boolean(battery.ready);
-  const batteryVoltage = Number(battery.cell_voltage ?? battery.voltage ?? 0);
-  const batteryCurrent = Number(battery.current ?? 0);
-  const batteryPercent = Number(battery.remaining_percent ?? -1);
-  const batteryTone = getBatteryTone(batteryVoltage, batteryReady);
-  const batteryLabel = getBatteryLabel(batteryVoltage, batteryReady);
-  const batteryPercentLabel = batteryPercent >= 0 && batteryPercent <= 100
-    ? `${batteryPercent.toFixed(0)}%`
-    : 'n/a';
-  const canRequestImuLevelCalibration = (
-    connectionState === 'Connected'
-    && Boolean(serverControl.serialPort)
-    && !serverControl.armed
-    && !localControl.armed
-  );
-  let imuLevelCalibrationTone = 'pending';
-  let imuLevelCalibrationLabel = 'Ready';
-  if (serverControl.armed || localControl.armed) {
-    imuLevelCalibrationTone = 'blocked';
-    imuLevelCalibrationLabel = 'Disarm first';
-  } else if (connectionState !== 'Connected') {
-    imuLevelCalibrationTone = 'blocked';
-    imuLevelCalibrationLabel = 'Frontend offline';
-  } else if (!serverControl.serialPort) {
-    imuLevelCalibrationTone = 'blocked';
-    imuLevelCalibrationLabel = 'Pick serial port';
-  } else if (system.imuLevelCalibrationPending && system.imuLevelCalibrationSent) {
-    imuLevelCalibrationTone = 'pending';
-    imuLevelCalibrationLabel = 'Retrying';
-  } else if (system.imuLevelCalibrationPending) {
-    imuLevelCalibrationTone = 'pending';
-    imuLevelCalibrationLabel = 'Sending';
-  } else if (system.imuLevelCalibrationSent) {
-    imuLevelCalibrationTone = 'ready';
-    imuLevelCalibrationLabel = 'Request sent';
-  }
-  const imuLevelCalibrationStatus = system.imuLevelCalibrationStatus || '';
-  const loggingSessionTone = system.loggingActive
-    ? 'ready'
-    : connectionState === 'Connected'
-      ? 'pending'
-      : 'blocked';
-  const loggingSessionLabel = system.loggingActive ? 'Logging active' : 'Logging idle';
-  const loggingSessionStatus = system.loggingStatus || '';
-  const latestMetricsLogName = system.metricsLogPath
-    ? system.metricsLogPath.split(/[/\\]/).pop()
-    : 'Not started';
   const gateCards = [
     {
       label: 'Dashboard link',
@@ -1105,107 +942,114 @@ function App() {
           ? system.lastSerialSendError || 'Waiting for first successful serial frame'
           : 'Needs serial + stream',
     },
+    (() => {
+      const battery = telemetry.battery ?? {};
+      const batteryReady = Boolean(battery.ready);
+      const batteryVoltage = Number(battery.cell_voltage ?? battery.voltage ?? 0);
+      const batteryPercent = Number(battery.remaining_percent ?? -1);
+      if (!batteryReady || batteryVoltage <= 0) {
+        return {
+          label: 'Battery',
+          value: 'No telemetry',
+          tone: 'blocked',
+          detail: 'Awaiting FC battery feed',
+        };
+      }
+      const tone = batteryVoltage < 3.4 ? 'blocked' : batteryVoltage < 3.5 ? 'pending' : 'ready';
+      const detail = batteryPercent >= 0 && batteryPercent <= 100
+        ? `${batteryPercent.toFixed(0)}% remaining`
+        : '1S LiPo';
+      return {
+        label: 'Battery',
+        value: `${batteryVoltage.toFixed(2)} V`,
+        tone,
+        detail,
+      };
+    })(),
   ];
   const outerLoopCards = [
     {
       id: 'xy-pos',
       pidAxis: 'xyPos',
       axisLabel: 'XY position',
-      title: 'XY hold',
-      step: '0.01',
-    },
-    {
-      id: 'z-pos',
-      pidAxis: 'zPos',
-      axisLabel: 'Z altitude',
-      title: 'Z hold',
-      step: '0.01',
-    },
-    {
-      id: 'yaw-pos',
-      pidAxis: 'yawPos',
-      axisLabel: 'Yaw heading',
-      title: 'Yaw hold',
       step: '0.01',
     },
     {
       id: 'xy-vel',
       pidAxis: 'xyVel',
       axisLabel: 'XY velocity',
-      title: 'XY damping',
+      step: '0.01',
+    },
+    {
+      id: 'z-pos',
+      pidAxis: 'zPos',
+      axisLabel: 'Z altitude',
       step: '0.01',
     },
     {
       id: 'z-vel',
       pidAxis: 'zVel',
       axisLabel: 'Z velocity',
-      title: 'Z damping',
+      step: '0.01',
+    },
+    {
+      id: 'yaw-pos',
+      pidAxis: 'yawPos',
+      axisLabel: 'Yaw heading',
       step: '0.01',
     },
   ];
-  const heroStatusCards = [
-    {
-      label: 'Frontend',
-      value: connectionState,
-      detail: 'Dashboard link',
-      tone: connectionState === 'Connected' ? 'ready' : connectionState === 'Connecting' ? 'pending' : 'blocked',
-    },
-    {
-      label: 'Tracking',
-      value: system.camerasReady ? 'Ready' : `${system.connectedCameras}/${system.expectedCameras}`,
-      detail: system.camerasReady ? 'Spatial data valid' : system.cameraError || 'Waiting for camera data',
-      tone: system.camerasReady ? 'ready' : 'blocked',
-    },
-    {
-      label: 'Sender',
-      value: system.serialConnected ? system.serialPort || 'Connected' : 'Offline',
-      detail: system.serialConnected ? 'ESP32-S3 link' : system.serialError || 'Select a COM port',
-      tone: system.serialConnected ? 'ready' : 'blocked',
-    },
-    {
-      label: 'Stream',
-      value: serverControl.active ? 'Live' : 'Stopped',
-      detail: serverControl.active ? 'Control frames are flowing' : 'Start the command stream',
-      tone: serverControl.active ? 'ready' : 'pending',
-    },
-    {
-      label: 'Motors',
-      value: serverControl.armed ? 'Armed' : 'Safe',
-      detail: serverControl.armed ? 'Propellers may spin' : 'Disarmed output state',
-      tone: serverControl.armed ? 'pending' : 'ready',
-    },
-    {
-      label: 'Battery',
-      value: batteryReady ? `${formatNumber(batteryVoltage, 2)} V` : 'Waiting',
-      detail: batteryReady ? `${batteryLabel} 1S LiPo` : 'FC battery telemetry',
-      tone: batteryTone,
-    },
-  ];
-  const targetSummaryText = `X ${formatNumber(localControl.target.x, 2)} / Y ${formatNumber(localControl.target.y, 2)} / Z ${formatNumber(localControl.target.z, 2)} / Yaw ${formatNumber(localControl.target.yaw, 1)} deg`;
+  const liveImu = telemetry.imu ?? {};
+  const pitchRateValue = Number(liveImu.pitch_rate ?? 0);
+  const rollRateValue = Number(liveImu.roll_rate ?? 0);
+  let yawRateValue = 0;
+  if (trajectorySamples.length >= 2) {
+    const a = trajectorySamples[trajectorySamples.length - 2];
+    const b = trajectorySamples[trajectorySamples.length - 1];
+    const dt = (b.t - a.t) / 1000;
+    if (dt > 0 && a.yaw !== undefined && b.yaw !== undefined) {
+      let dy = b.yaw - a.yaw;
+      if (dy > 180) dy -= 360;
+      if (dy < -180) dy += 360;
+      yawRateValue = dy / dt;
+    }
+  }
   const flightMetricCards = [
     {
       label: 'Position X',
       value: `${formatNumber(livePosition.x)} m`,
     },
     {
-      label: 'Pitch',
-      value: `${formatNumber(liveRotation.pitch, 2)} deg`,
-    },
-    {
       label: 'Position Y',
       value: `${formatNumber(livePosition.y)} m`,
-    },
-    {
-      label: 'Roll',
-      value: `${formatNumber(liveRotation.roll, 2)} deg`,
     },
     {
       label: 'Position Z',
       value: `${formatNumber(livePosition.z)} m`,
     },
     {
+      label: 'Pitch',
+      value: `${formatNumber(liveRotation.pitch, 2)} deg`,
+    },
+    {
+      label: 'Roll',
+      value: `${formatNumber(liveRotation.roll, 2)} deg`,
+    },
+    {
       label: 'Yaw',
       value: `${formatNumber(liveRotation.yaw, 2)} deg`,
+    },
+    {
+      label: 'Pitch rate',
+      value: `${formatNumber(pitchRateValue, 2)} deg/s`,
+    },
+    {
+      label: 'Roll rate',
+      value: `${formatNumber(rollRateValue, 2)} deg/s`,
+    },
+    {
+      label: 'Yaw rate',
+      value: `${formatNumber(yawRateValue, 2)} deg/s`,
     },
   ];
   const allPrimaryLinksReady = (
@@ -1226,27 +1070,6 @@ function App() {
     readinessTone = 'blocked';
     readinessTitle = 'System not ready';
   }
-  let nextActionTitle = 'Start the command stream';
-  if (connectionState !== 'Connected') {
-    nextActionTitle = 'Reconnect the dashboard';
-  } else if (!localControl.serialPort) {
-    nextActionTitle = 'Choose the sender COM port';
-  } else if (isDirty) {
-    nextActionTitle = 'Apply pending changes';
-  } else if (!system.serialConnected) {
-    nextActionTitle = 'Connect the sender link';
-  } else if (!system.camerasReady) {
-    nextActionTitle = 'Wait for tracking to recover';
-  } else if (!serverControl.active) {
-    nextActionTitle = 'Start the command stream';
-  } else if (!system.canSendToEsp32) {
-    nextActionTitle = 'Wait for the sender path';
-  } else if (!serverControl.armed) {
-    nextActionTitle = 'Arm only when the area is clear';
-  } else {
-    nextActionTitle = 'Monitor hover and logging';
-  }
-
   return (
     <div className="app-shell">
       <main className="dashboard">
@@ -1272,33 +1095,13 @@ function App() {
             </div>
           </div>
 
-          <div className="hero-status-grid">
-            {heroStatusCards.map((card) => (
-              <StatusCard key={card.label} {...card} />
-            ))}
-          </div>
-        </section>
-
-        <section className="layout-grid">
-          <article className="panel panel-overview">
-            <div className="panel-heading">
+          <div className="hero-readiness">
+            <div className="hero-readiness-heading">
               <div>
                 <p className="panel-label">Readiness</p>
                 <h2>What needs attention now</h2>
               </div>
               <span className={`mini-badge ${readinessTone}`}>{readinessTitle}</span>
-            </div>
-
-            <div className={`readiness-banner ${readinessTone}`}>
-              <div>
-                <span className="meta-label">Overall state</span>
-                <strong>{readinessTitle}</strong>
-              </div>
-            </div>
-
-            <div className="next-step-card">
-              <span className="meta-label">Next step</span>
-              <strong>{nextActionTitle}</strong>
             </div>
 
             <div className="gate-grid">
@@ -1333,20 +1136,21 @@ function App() {
                 </strong>
               </div>
             </div>
-          </article>
+          </div>
+        </section>
 
+        <section className="layout-grid">
           <article className="panel panel-control">
             <div className="panel-heading">
               <div>
                 <p className="panel-label">Controls</p>
-                <h2>Connect, stream, and prepare hover</h2>
               </div>
               <div className="panel-actions">
                 <span className={`mini-badge ${isDirty ? 'pending' : 'clean'}`}>
                   {isDirty ? 'Pending changes' : 'All changes applied'}
                 </span>
-                <button className="ghost-button" onClick={() => sendMessage({ type: 'refresh_serial_ports' })}>
-                  Refresh ports
+                <button className="primary-button" onClick={() => applyControl()}>
+                  Apply all changes
                 </button>
               </div>
             </div>
@@ -1380,9 +1184,6 @@ function App() {
             </div>
 
             <div className="action-row action-row-primary">
-              <button className="primary-button" onClick={() => applyControl()}>
-                Apply all changes
-              </button>
               <button
                 className={`toggle-button toggle-button-stream ${localControl.active ? 'active' : ''}`}
                 onClick={toggleActivation}
@@ -1393,7 +1194,7 @@ function App() {
                 className={`toggle-button toggle-button-arm ${localControl.armed ? 'active' : ''}`}
                 onClick={toggleArm}
               >
-                {localControl.armed ? 'Disarm motors' : 'Arm motors'}
+                {localControl.armed ? 'Disarm' : 'Arm'}
               </button>
               <button
                 className={`toggle-button toggle-button-land ${system.landing?.active ? 'active' : ''}`}
@@ -1412,249 +1213,113 @@ function App() {
               </button>
             </div>
 
-            <div className="system-list compact">
-              <div>
-                <span>Selected port</span>
-                <strong>{localControl.serialPort || 'Not selected'}</strong>
-              </div>
-              <div>
-                <span>Baud rate</span>
-                <strong>{localControl.baudRate}</strong>
-              </div>
-              <div>
-                <span>Hover target</span>
-                <strong>{targetSummaryText}</strong>
-              </div>
-              <div>
-                <span>Latest log file</span>
-                <strong>{latestMetricsLogName}</strong>
-              </div>
-            </div>
-
             <div className="control-stack">
-              <DisclosureSection
-                label="Target and limits"
-                title="Hover target and safety bounds"
-                defaultOpen
-              >
-                <div className="subsection-card">
-                  <div className="subsection-head">
-                    <span className="meta-label">Hover target</span>
-                    <strong>Where the drone should hold station</strong>
-                  </div>
-                  <div className="field-grid field-grid-compact">
-                    <label>
-                      <span>Target X</span>
-                      <input
-                        type="number"
-                        step="0.01"
-                        value={localControl.target.x}
-                        onChange={(event) => updateNestedControlField('target', 'x', event.target.value)}
-                      />
-                    </label>
-                    <label>
-                      <span>Target Y</span>
-                      <input
-                        type="number"
-                        step="0.01"
-                        value={localControl.target.y}
-                        onChange={(event) => updateNestedControlField('target', 'y', event.target.value)}
-                      />
-                    </label>
-                    <label>
-                      <span>Target Z</span>
-                      <input
-                        type="number"
-                        step="0.01"
-                        value={localControl.target.z}
-                        onChange={(event) => updateNestedControlField('target', 'z', event.target.value)}
-                      />
-                    </label>
-                    <label>
-                      <span>Target Yaw</span>
-                      <input
-                        type="number"
-                        step="1"
-                        value={localControl.target.yaw}
-                        onChange={(event) => updateNestedControlField('target', 'yaw', event.target.value)}
-                      />
-                    </label>
-                  </div>
-                </div>
-
-                <div className="subsection-card">
-                  <div className="subsection-head">
-                    <span className="meta-label">Safety limits</span>
-                    <strong>Throttle and attitude limits</strong>
-                  </div>
-                  <div className="field-grid">
-                    <label>
-                      <span>Hover throttle</span>
-                      <input
-                        type="number"
-                        step="0.01"
-                        min="0"
-                        max="1"
-                        value={localControl.limits.hoverThrottle}
-                        onChange={(event) => updateNestedControlField('limits', 'hoverThrottle', event.target.value)}
-                      />
-                    </label>
-                    <label>
-                      <span>Min throttle</span>
-                      <input
-                        type="number"
-                        step="0.01"
-                        min="0"
-                        max="1"
-                        value={localControl.limits.minThrottle}
-                        onChange={(event) => updateNestedControlField('limits', 'minThrottle', event.target.value)}
-                      />
-                    </label>
-                    <label>
-                      <span>Max throttle</span>
-                      <input
-                        type="number"
-                        step="0.01"
-                        min="0"
-                        max="1"
-                        value={localControl.limits.maxThrottle}
-                        onChange={(event) => updateNestedControlField('limits', 'maxThrottle', event.target.value)}
-                      />
-                    </label>
-                    <label>
-                      <span>Max tilt (deg)</span>
-                      <input
-                        type="number"
-                        step="0.5"
-                        min="1"
-                        value={localControl.limits.maxTiltDeg}
-                        onChange={(event) => updateNestedControlField('limits', 'maxTiltDeg', event.target.value)}
-                      />
-                    </label>
-                    <label>
-                      <span>Max yaw rate (deg/s)</span>
-                      <input
-                        type="number"
-                        step="1"
-                        min="1"
-                        value={localControl.limits.maxYawRateDeg}
-                        onChange={(event) => updateNestedControlField('limits', 'maxYawRateDeg', event.target.value)}
-                      />
-                    </label>
-                  </div>
-                </div>
-
-                <div className="pid-loops-grid">
-                  <section className="loop-section">
-                    <div className="loop-head">
-                      <div>
-                        <span className="meta-label">PID tuning</span>
-                        <strong>World-frame position, heading, and velocity</strong>
-                      </div>
-                    </div>
-                    <div className="pid-card-grid">
-                      {outerLoopCards.map((card) => (
-                        <PidAxisCard
-                          key={card.id}
-                          tone="outer"
-                          axisLabel={card.axisLabel}
-                          title={card.title}
-                          pid={localControl.pid[card.pidAxis] ?? DEFAULT_PID[card.pidAxis]}
-                          step={card.step}
-                          onChange={(term, value) => updatePidValue(card.pidAxis, term, value)}
-                        />
-                      ))}
-                    </div>
-                  </section>
-                </div>
-              </DisclosureSection>
-
-              <DisclosureSection label="Service tools" title="Logging and IMU calibration">
-                <div className="disclosure-grid">
-                  <div className="subsection-card">
-                    <div className="subsection-head">
-                      <span className="meta-label">Logging session</span>
-                      <strong>Manual start and stop</strong>
-                    </div>
-                    <div className="action-row">
-                      <button
-                        className={`toggle-button toggle-button-stream ${system.loggingActive ? 'active' : ''}`}
-                        onClick={toggleLoggingSession}
-                        disabled={connectionState !== 'Connected'}
-                      >
-                        {system.loggingActive ? 'Stop logging session' : 'Start logging session'}
-                      </button>
-                      <span className={`pill ${loggingSessionTone}`}>{loggingSessionLabel}</span>
-                    </div>
-                    {loggingSessionStatus ? <p className="hint">{loggingSessionStatus}</p> : null}
-                    <div className="system-list compact">
-                      <div>
-                        <span>Session log</span>
-                        <strong>{latestMetricsLogName}</strong>
-                      </div>
-                    </div>
-                  </div>
-
-                  <div className="subsection-card">
-                    <div className="subsection-head">
-                      <span className="meta-label">IMU level trim</span>
-                      <strong>Set horizontal zero</strong>
-                    </div>
-                    <div className="action-row">
-                      <button
-                        className="ghost-button"
-                        onClick={requestImuLevelCalibration}
-                        disabled={!canRequestImuLevelCalibration}
-                      >
-                        Calibrate IMU level
-                      </button>
-                      <span className={`pill ${imuLevelCalibrationTone}`}>{imuLevelCalibrationLabel}</span>
-                    </div>
-                    {imuLevelCalibrationStatus ? <p className="hint">{imuLevelCalibrationStatus}</p> : null}
-                  </div>
-                </div>
-              </DisclosureSection>
-            </div>
-          </article>
-
-          <article className="panel panel-telemetry">
-            <div className="panel-heading">
-              <div>
-                <p className="panel-label">Live state</p>
-                <h2>Pose and battery</h2>
+              <div className="field-grid field-grid-compact">
+                <label>
+                  <span>Target X</span>
+                  <input
+                    type="number"
+                    step="0.01"
+                    value={localControl.target.x}
+                    onChange={(event) => updateNestedControlField('target', 'x', event.target.value)}
+                  />
+                </label>
+                <label>
+                  <span>Target Y</span>
+                  <input
+                    type="number"
+                    step="0.01"
+                    value={localControl.target.y}
+                    onChange={(event) => updateNestedControlField('target', 'y', event.target.value)}
+                  />
+                </label>
+                <label>
+                  <span>Target Z</span>
+                  <input
+                    type="number"
+                    step="0.01"
+                    value={localControl.target.z}
+                    onChange={(event) => updateNestedControlField('target', 'z', event.target.value)}
+                  />
+                </label>
+                <label>
+                  <span>Target Yaw</span>
+                  <input
+                    type="number"
+                    step="1"
+                    value={localControl.target.yaw}
+                    onChange={(event) => updateNestedControlField('target', 'yaw', event.target.value)}
+                  />
+                </label>
               </div>
-            </div>
 
-            <div className="metric-grid metric-grid-live">
-              {flightMetricCards.map((card) => (
-                <div key={card.label} className={`metric-card ${card.tone ?? ''}`.trim()}>
-                  <span>{card.label}</span>
-                  <strong>{card.value}</strong>
-                </div>
-              ))}
-            </div>
-
-            <div className={`battery-status-card ${batteryTone}`}>
-              <div className="battery-status-main">
-                <div>
-                  <span className="meta-label">1S LiPo</span>
-                  <strong>{batteryReady ? `${formatNumber(batteryVoltage, 2)} V` : 'Battery unavailable'}</strong>
-                </div>
-                <span className={`mini-badge ${batteryTone}`}>{batteryLabel}</span>
+              <div className="field-grid field-grid-row-5">
+                <label>
+                  <span>Hover throttle</span>
+                  <input
+                    type="number"
+                    step="0.01"
+                    min="0"
+                    max="1"
+                    value={localControl.limits.hoverThrottle}
+                    onChange={(event) => updateNestedControlField('limits', 'hoverThrottle', event.target.value)}
+                  />
+                </label>
+                <label>
+                  <span>Min throttle</span>
+                  <input
+                    type="number"
+                    step="0.01"
+                    min="0"
+                    max="1"
+                    value={localControl.limits.minThrottle}
+                    onChange={(event) => updateNestedControlField('limits', 'minThrottle', event.target.value)}
+                  />
+                </label>
+                <label>
+                  <span>Max throttle</span>
+                  <input
+                    type="number"
+                    step="0.01"
+                    min="0"
+                    max="1"
+                    value={localControl.limits.maxThrottle}
+                    onChange={(event) => updateNestedControlField('limits', 'maxThrottle', event.target.value)}
+                  />
+                </label>
+                <label>
+                  <span>Max tilt (deg)</span>
+                  <input
+                    type="number"
+                    step="0.5"
+                    min="1"
+                    value={localControl.limits.maxTiltDeg}
+                    onChange={(event) => updateNestedControlField('limits', 'maxTiltDeg', event.target.value)}
+                  />
+                </label>
+                <label>
+                  <span>Max yaw rate (deg/s)</span>
+                  <input
+                    type="number"
+                    step="1"
+                    min="1"
+                    value={localControl.limits.maxYawRateDeg}
+                    onChange={(event) => updateNestedControlField('limits', 'maxYawRateDeg', event.target.value)}
+                  />
+                </label>
               </div>
-              <div className="battery-status-grid">
-                <div>
-                  <span>Telemetry</span>
-                  <strong>{batteryReady ? 'Live' : 'Waiting'}</strong>
-                </div>
-                <div>
-                  <span>Remaining</span>
-                  <strong>{batteryPercentLabel}</strong>
-                </div>
-                <div>
-                  <span>Current</span>
-                  <strong>{batteryReady ? `${formatNumber(batteryCurrent, 2)} A` : 'n/a'}</strong>
-                </div>
+
+              <div className="pid-card-grid">
+                {outerLoopCards.map((card) => (
+                  <PidAxisCard
+                    key={card.id}
+                    tone="outer"
+                    axisLabel={card.axisLabel}
+                    pid={localControl.pid[card.pidAxis] ?? DEFAULT_PID[card.pidAxis]}
+                    step={card.step}
+                    onChange={(term, value) => updatePidValue(card.pidAxis, term, value)}
+                  />
+                ))}
               </div>
             </div>
           </article>
@@ -1667,6 +1332,15 @@ function App() {
               </div>
             </div>
             <TrajectoryPanel telemetry={telemetry} samples={trajectorySamples} target={localControl.target} />
+
+            <div className="metric-grid metric-grid-live">
+              {flightMetricCards.map((card) => (
+                <div key={card.label} className={`metric-card ${card.tone ?? ''}`.trim()}>
+                  <span>{card.label}</span>
+                  <strong>{card.value}</strong>
+                </div>
+              ))}
+            </div>
           </article>
 
           <article className="panel panel-cameras">
