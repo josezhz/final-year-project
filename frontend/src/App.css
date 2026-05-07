@@ -78,13 +78,6 @@
   position: relative;
 }
 
-.hero-intro {
-  display: grid;
-  gap: 0.55rem;
-  align-content: start;
-}
-
-.eyebrow,
 .panel-label,
 .meta-label {
   margin: 0;
@@ -111,51 +104,13 @@
   color: transparent;
 }
 
-.hero-subtitle {
-  margin: 0.3rem 0 0;
-  color: var(--muted-strong);
-  font-size: 1rem;
-  line-height: 1.5;
-  max-width: 52ch;
-}
 
-.hero-meta {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 0.55rem;
-  margin-top: 0.4rem;
-  color: var(--muted);
-  font-size: 0.86rem;
-}
-
-.hero-meta-divider {
-  color: rgba(255, 255, 255, 0.25);
-}
-
-.hero-meta-text {
-  color: var(--muted-strong);
-}
-
-.hero-readiness {
-  display: grid;
-  gap: var(--gap-cluster);
-}
-
-.hero-readiness-heading {
+.hero-title-row {
   display: flex;
   justify-content: space-between;
-  align-items: flex-start;
+  align-items: center;
   gap: 0.8rem;
-  padding-bottom: 0.6rem;
-  border-bottom: 1px solid var(--border);
-}
-
-.hero-readiness-heading h2 {
-  margin: 0.2rem 0 0;
-  font-weight: 650;
-  font-size: 1.3rem;
-  letter-spacing: -0.01em;
+  flex-wrap: wrap;
 }
 
 /* ---------------------------- Cards ------------------------------- */
@@ -693,6 +648,12 @@ button:disabled:hover {
   display: block;
 }
 
+.chart-svg-square {
+  aspect-ratio: 1 / 1;
+  height: auto;
+  min-height: 0;
+}
+
 .chart-backdrop {
   fill: rgba(255, 255, 255, 0.025);
   stroke: var(--border);
@@ -1048,10 +1009,6 @@ button:disabled:hover {
     font-size: clamp(2.05rem, 8vw, 2.8rem);
   }
 
-  .hero-subtitle {
-    font-size: 0.95rem;
-  }
-
   .panel {
     padding: 1rem;
   }
@@ -1096,7 +1053,6 @@ button:disabled:hover {
 
 .camera-card figcaption > *,
 .chart-heading > *,
-.hero-meta > *,
 .pid-axis-head > * {
   min-width: 0;
 }
@@ -1110,8 +1066,7 @@ button:disabled:hover {
 .camera-card figcaption strong,
 .camera-card figcaption span,
 .chart-heading strong,
-.chart-window,
-.hero-meta-text {
+.chart-window {
   display: block;
   max-width: 100%;
   min-width: 0;

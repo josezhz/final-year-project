@@ -20,24 +20,24 @@ const EMPTY_TELEMETRY = {
 
 const PID_TERMS = ['kp', 'ki', 'kd'];
 const DEFAULT_PID = {
-  xyPos: { kp: 1, ki: 0, kd: 0 },
-  zPos: { kp: 1.5, ki: 0, kd: 0 },
-  yawPos: { kp: 0.3, ki: 0.1, kd: 0.05 },
-  xyVel: { kp: 0.2, ki: 0.03, kd: 0.05 },
-  zVel: { kp: 0.3, ki: 0.1, kd: 0.05 },
+  xyPos: { kp: 10.0, ki: 0.10, kd: 0.0 },
+  zPos: { kp: 0.5, ki: 0.0, kd: 0.2 },
+  yawPos: { kp: 1.2, ki: 0.0, kd: 0.0 },
+  xyVel: { kp: 2.5, ki: 0.0, kd: 0.0 },
+  zVel: { kp: 0.8, ki: 0.0, kd: 0.1 },
 };
 const DEFAULT_TARGET = {
-  x: 0,
-  y: 0,
-  z: 0.25,
-  yaw: 0,
+  x: 0.0,
+  y: 0.0,
+  z: 0.35,
+  yaw: 0.0,
 };
 const DEFAULT_LIMITS = {
-  hoverThrottle: 0.36,
-  minThrottle: 0.18,
-  maxThrottle: 0.82,
-  maxTiltDeg: 12,
-  maxYawRateDeg: 120,
+  hoverThrottle: 0.75,
+  minThrottle: 0.42,
+  maxThrottle: 1.00,
+  maxTiltDeg: 8.0,
+  maxYawRateDeg: 180.0,
 };
 
 const EMPTY_CONTROL = {
@@ -203,7 +203,7 @@ function CameraPoseScene({ cameraPoses, telemetry }) {
   return (
     <>
       <div className="scene-canvas-shell" role="img" aria-label="Interactive 3D camera pose scene">
-        <Canvas camera={{ position: [1.8, -1.8, 1.3], fov: 42 }}>
+        <Canvas camera={{ position: [1.8, 1.8, 1.3], fov: 42 }}>
           <color attach="background" args={['#0c1526']} />
           <ambientLight intensity={0.75} />
           <directionalLight position={[2.5, -3, 4]} intensity={1.2} />
@@ -285,7 +285,7 @@ function CameraPoseScene({ cameraPoses, telemetry }) {
 
 function XYTrajectoryChart({ samples, telemetry, target }) {
   const width = 520;
-  const height = 320;
+  const height = 520;
   const padding = 34;
   const innerWidth = width - padding * 2;
   const innerHeight = height - padding * 2;
@@ -332,7 +332,7 @@ function XYTrajectoryChart({ samples, telemetry, target }) {
         <span className="chart-window">Last 3.0 s</span>
       </div>
 
-      <svg viewBox={`0 0 ${width} ${height}`} className="chart-svg" role="img" aria-label="XY trajectory plot">
+      <svg viewBox={`0 0 ${width} ${height}`} className="chart-svg chart-svg-square" role="img" aria-label="XY trajectory plot">
         <rect x="0" y="0" width={width} height={height} rx="20" className="chart-backdrop" />
         <line x1={padding} y1={scaleY(0)} x2={width - padding} y2={scaleY(0)} className="chart-axis chart-axis-origin" />
         <line x1={scaleX(0)} y1={padding} x2={scaleX(0)} y2={height - padding} className="chart-axis chart-axis-origin" />
@@ -408,7 +408,7 @@ function XYTrajectoryChart({ samples, telemetry, target }) {
 
 function ZTimelineChart({ samples, telemetry, target }) {
   const width = 520;
-  const height = 320;
+  const height = 520;
   const padding = 34;
   const innerWidth = width - padding * 2;
   const innerHeight = height - padding * 2;
@@ -431,7 +431,7 @@ function ZTimelineChart({ samples, telemetry, target }) {
         <span className="chart-window">Last 3.0 s</span>
       </div>
 
-      <svg viewBox={`0 0 ${width} ${height}`} className="chart-svg" role="img" aria-label="Z versus time plot">
+      <svg viewBox={`0 0 ${width} ${height}`} className="chart-svg chart-svg-square" role="img" aria-label="Z versus time plot">
         <rect x="0" y="0" width={width} height={height} rx="20" className="chart-backdrop" />
         <line x1={padding} y1={scaleY(0)} x2={width - padding} y2={scaleY(0)} className="chart-axis chart-axis-origin" />
         <line x1={padding} y1={padding} x2={padding} y2={height - padding} className="chart-axis" />
@@ -925,14 +925,6 @@ function App() {
       detail: serverControl.active ? 'Backend is forwarding control frames' : 'Enable stream from the frontend',
     },
     {
-      label: 'Motor state',
-      value: serverControl.armed ? 'Armed' : 'Safe',
-      tone: serverControl.armed ? 'pending' : 'ready',
-      detail: serverControl.armed
-        ? 'Motors may spin when tracking stays valid'
-        : 'Safe output state',
-    },
-    {
       label: 'Data path',
       value: system.serialForwarding ? 'Live' : system.canSendToEsp32 ? 'Ready' : 'Blocked',
       tone: system.serialForwarding ? 'ready' : system.canSendToEsp32 ? 'pending' : 'blocked',
@@ -1074,67 +1066,41 @@ function App() {
     <div className="app-shell">
       <main className="dashboard">
         <section className="hero">
-          <div className="hero-intro">
-            <p className="eyebrow">Operator console</p>
+          <div className="hero-title-row">
             <h1>Mocap Drone Control</h1>
-            <p className="hero-subtitle">
-              Live motion-capture pose, flight controller telemetry, and hover command stream in one view.
-            </p>
-            <div className="hero-meta">
-              <span className={`mini-badge ${connectionState === 'Connected' ? 'ready' : connectionState === 'Connecting' ? 'pending' : 'blocked'}`}>
-                {connectionState}
-              </span>
-              <span className="hero-meta-divider" aria-hidden="true">·</span>
-              <span className="hero-meta-text">
-                {system.connectedCameras}/{system.expectedCameras} cameras
-              </span>
-              <span className="hero-meta-divider" aria-hidden="true">·</span>
-              <span className="hero-meta-text">
-                {serverControl.armed ? 'Motors armed' : 'Motors safe'}
-              </span>
-            </div>
+            <span className={`mini-badge ${readinessTone}`}>{readinessTitle}</span>
           </div>
 
-          <div className="hero-readiness">
-            <div className="hero-readiness-heading">
-              <div>
-                <p className="panel-label">Readiness</p>
-                <h2>What needs attention now</h2>
+          <div className="gate-grid">
+            {gateCards.map((gate) => (
+              <div key={gate.label} className={`gate-card ${gate.tone}`}>
+                <span className="meta-label">{gate.label}</span>
+                <strong>{gate.value}</strong>
+                <small>{gate.detail}</small>
               </div>
-              <span className={`mini-badge ${readinessTone}`}>{readinessTitle}</span>
-            </div>
+            ))}
+          </div>
 
-            <div className="gate-grid">
-              {gateCards.map((gate) => (
-                <div key={gate.label} className={`gate-card ${gate.tone}`}>
-                  <span className="meta-label">{gate.label}</span>
-                  <strong>{gate.value}</strong>
-                  <small>{gate.detail}</small>
-                </div>
-              ))}
+          <div className="system-list compact">
+            <div>
+              <span>Frontend clients</span>
+              <strong>{system.frontendClients}</strong>
             </div>
-
-            <div className="system-list compact">
-              <div>
-                <span>Frontend clients</span>
-                <strong>{system.frontendClients}</strong>
-              </div>
-              <div>
-                <span>Camera IDs</span>
-                <strong>{system.cameraIds.length ? system.cameraIds.join(', ') : 'Unavailable'}</strong>
-              </div>
-              <div>
-                <span>Tracking state</span>
-                <strong>{system.camerasReady ? 'Valid spatial data' : system.cameraError || 'Tracking invalid'}</strong>
-              </div>
-              <div>
-                <span>Sender state</span>
-                <strong>
-                  {system.serialConnected
-                    ? system.lastSerialSendError || 'Connected'
-                    : system.serialError || 'Disconnected'}
-                </strong>
-              </div>
+            <div>
+              <span>Camera IDs</span>
+              <strong>{system.cameraIds.length ? system.cameraIds.join(', ') : 'Unavailable'}</strong>
+            </div>
+            <div>
+              <span>Tracking state</span>
+              <strong>{system.camerasReady ? 'Valid spatial data' : system.cameraError || 'Tracking invalid'}</strong>
+            </div>
+            <div>
+              <span>Sender state</span>
+              <strong>
+                {system.serialConnected
+                  ? system.lastSerialSendError || 'Connected'
+                  : system.serialError || 'Disconnected'}
+              </strong>
             </div>
           </div>
         </section>
@@ -1328,7 +1294,6 @@ function App() {
             <div className="panel-heading">
               <div>
                 <p className="panel-label">Motion</p>
-                <h2>Live flight trends</h2>
               </div>
             </div>
             <TrajectoryPanel telemetry={telemetry} samples={trajectorySamples} target={localControl.target} />
@@ -1347,7 +1312,6 @@ function App() {
             <div className="panel-heading">
               <div>
                 <p className="panel-label">Monitoring</p>
-                <h2>Live camera previews</h2>
               </div>
             </div>
 
@@ -1380,7 +1344,6 @@ function App() {
             <div className="panel-heading">
               <div>
                 <p className="panel-label">Space</p>
-                <h2>3D room view</h2>
               </div>
             </div>
             <CameraPoseScene cameraPoses={system.cameraPoses} telemetry={telemetry} />
