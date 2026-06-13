@@ -8,18 +8,11 @@ This branch is the Betaflight flight-controller variant. Instead of running the 
 
 The project is built around a multi-camera infrared tracking workflow that detects active markers, reconstructs their 3D position, and uses that localization data to support closed-loop drone control. In this branch, the repository includes:
 
-- an architecture diagram for the Betaflight flight-controller path in `architecture-bf-fc.png`
 - camera calibration utilities for intrinsic and extrinsic setup
 - a backend tracking server for marker detection, triangulation, pose estimation, session logging, and serial transport
 - a frontend dashboard for operator setup, activation, target selection, and outer-loop PID tuning
 - an `esp32-s3-sender` bridge that receives compact control frames over USB serial and forwards them over ESP-NOW
 - an `esp32-s3-receiver` node that converts those mocap control payloads into CRSF RC frames for a Betaflight-compatible flight controller
-
-## Architecture
-
-![Betaflight flight-controller architecture](architecture-bf-fc.png)
-
-The diagram shows the branch-specific control path from camera capture and backend pose estimation through the frontend operator dashboard, ESP32-S3 ESP-NOW bridge, vehicle-side receiver, and Betaflight flight controller.
 
 ## Control Flow
 
